@@ -65,8 +65,8 @@ const char index_html[] = R"rawliteral(
     </div>
     <div class="container">
         <div class="tabs">
-            <a href="/" class="tab active">Photo Sync</a>
             <a href="/wifi" class="tab">Wi-Fi Settings</a>
+            <a href="/photos" class="tab active">Photo Sync</a>
         </div>
         <div class="card">
             <div class="warning-banner" id="macWarning">
@@ -251,6 +251,7 @@ static bool upload_overlay_open = false;
 static uint32_t upload_overlay_opened_ms = 0;
 
 bool wifi_ap_running = false;
+bool pf_autostart_wifi = false;  // when true, the WiFi overlay opens with the hotspot ON
 static uint32_t menu_opened_time = 0;
 
 extern void switch_to_launcher();
@@ -374,6 +375,18 @@ void pf_show_upload_overlay(void) {
             stop_photoframe_wifi();
         }
     }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // First-run onboarding: open with the hotspot already ON.
+    if (pf_autostart_wifi) {
+        pf_autostart_wifi = false;
+        lv_obj_add_state(wifi_sw, LV_STATE_CHECKED);
+        // Defer the AP start briefly so it doesn't collide with LVGL rendering.
+        lv_timer_t * t = lv_timer_create([](lv_timer_t * tm) {
+            start_photoframe_wifi();
+            lv_timer_del(tm);
+        }, 400, NULL);
+        (void)t;
+    }
 
     lv_obj_t * wifi_lbl = lv_label_create(pf_upload_overlay);
     lv_label_set_text(wifi_lbl, "Enable Wi-Fi:");
@@ -954,7 +967,9 @@ void photoframe_setup() {
         }
     }
 
-    photo_server.on("/", HTTP_GET, []() { photo_server.send(200, "text/html", index_html); });
+    // Default page is now Wi-Fi setup; photo sync moved to /photos.
+    photo_server.on("/", HTTP_GET, []() { photo_server.sendHeader("Location", "/wifi"); photo_server.send(302); });
+    photo_server.on("/photos", HTTP_GET, []() { photo_server.send(200, "text/html", index_html); });
     photo_server.on("/upload", HTTP_POST, []() { photo_server.send(200, "text/plain", "OK"); }, []() {
         HTTPUpload& upload = photo_server.upload();
         if (upload.status == UPLOAD_FILE_START) {
@@ -1013,8 +1028,8 @@ void photoframe_setup() {
   </div>
   <div class="container">
       <div class="tabs">
-          <a href="/" class="tab">Photo Sync</a>
           <a href="/wifi" class="tab active">Wi-Fi Settings</a>
+          <a href="/photos" class="tab">Photo Sync</a>
       </div>
       <p>Add your home WiFi or phone hotspot. The device will connect automatically when you check for updates.</p>
       <div class='card'>

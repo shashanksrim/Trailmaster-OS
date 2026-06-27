@@ -116,6 +116,8 @@ extern "C" {
 void switch_to_launcher();
 void force_full_ui_redraw(lv_obj_t * target_scr);
 void build_grid_launcher();
+extern void pf_show_upload_overlay(void);
+extern bool pf_autostart_wifi;   // defined in PhotoFrameApp.cpp
 
 // --- SHARED UI LOGIC ---
 static bool ignore_until_lift = false;
@@ -1781,6 +1783,18 @@ void setup() {
     } else {
         lv_scr_load_anim(ui_uispeedometer, LV_SCR_LOAD_ANIM_FADE_ON, 800, 0, true);
     }
+
+    // First-run onboarding: if no WiFi networks are saved yet, open the Wi-Fi
+    // setup overlay with the hotspot already ON so the user can configure WiFi.
+    lv_timer_t * onboarding = lv_timer_create([](lv_timer_t * t) {
+        char ssids[8][33];
+        if (ota_list_networks(ssids, 8) == 0) {
+            pf_autostart_wifi = true;
+            pf_show_upload_overlay();
+        }
+        lv_timer_del(t);
+    }, 2000, NULL);
+    (void)onboarding;
 }
 
 void loop() {

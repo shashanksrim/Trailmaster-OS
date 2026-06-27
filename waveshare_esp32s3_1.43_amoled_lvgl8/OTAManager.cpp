@@ -429,6 +429,14 @@ static void download_sd_files() {
 
         if (!sd_path[0] || !dl_url[0]) continue;
 
+        // Skip files already present on the SD card. This makes re-provisioning
+        // cheap: a populated card downloads nothing; a blank card gets everything.
+        {
+            String existing = String("/sd_card") + sd_path;
+            struct stat stt;
+            if (stat(existing.c_str(), &stt) == 0 && stt.st_size > 0) { done++; continue; }
+        }
+
         char status_buf[96];
         snprintf(status_buf, sizeof(status_buf), "Updating SD files %d/%d", done + 1, total_files);
         set_status(OTA_DOWNLOADING_SD, (done * 100) / total_files, status_buf);
@@ -506,6 +514,12 @@ static void ota_task(void* param) {
             return;
         }
         fetch_version_info();
+        // If firmware is already current, still provision any MISSING SD files
+        // (Option A: fresh/blank card gets its content; populated card is a no-op).
+        if (s_status.state == OTA_UP_TO_DATE) {
+            download_sd_files();
+            set_status(OTA_UP_TO_DATE, 100, "Up to date");
+        }
     }
 
     s_task_handle = NULL;
