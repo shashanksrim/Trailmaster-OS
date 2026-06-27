@@ -469,6 +469,15 @@ static void ota_task(void* param) {
     bool do_install = (param != NULL);
 
     if (do_install) {
+        // The version check disconnects WiFi when done, so re-establish it before
+        // downloading (otherwise the GET fails with a connection error / HTTP -1).
+        if (WiFi.status() != WL_CONNECTED) {
+            if (!connect_to_known_network()) {
+                vTaskDelete(NULL);
+                return;
+            }
+        }
+        set_status(OTA_DOWNLOADING_FW, 0, "Downloading firmware...");
         // User confirmed install — proceed with firmware download
         if (!download_and_flash_firmware(s_pending_fw_url)) {
             vTaskDelete(NULL);
