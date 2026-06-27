@@ -1,0 +1,8 @@
+# Build / dependency artifacts (not source)
+node_modules/
+build_out/
+build/
+
+# Host unit-test compiled binary
+test/test_ota
+waveshare_esp32s3_1.43_amoled_lvgl8/test/test_ota

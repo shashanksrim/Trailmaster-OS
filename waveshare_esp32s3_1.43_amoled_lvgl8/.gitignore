@@ -1,0 +1,4 @@
+build
+.vscode
+build_out/
+test/test_ota

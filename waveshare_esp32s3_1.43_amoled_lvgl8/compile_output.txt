@@ -1,0 +1,17 @@
+
+[92mUsed library[0m    [92mVersion[0m [90mPath[0m
+[93mlvgl[0m            8.3.11  [90m/Users/sriramshashank/Documents/Arduino/libraries/lvgl[0m
+[93mWiFi[0m            3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/WiFi[0m
+[93mNetworking[0m      3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/Network[0m
+[93mAnimatedGIF[0m     2.2.0   [90m/Users/sriramshashank/Documents/Arduino/libraries/AnimatedGIF[0m
+[93mWebServer[0m       3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/WebServer[0m
+[93mFS[0m              3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/FS[0m
+[93mDNSServer[0m       3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/DNSServer[0m
+[93mESP32 Async UDP[0m 3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/AsyncUDP[0m
+[93mFFat[0m            3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/FFat[0m
+[93mSPI[0m             3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/SPI[0m
+[93mSD[0m              3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/SD[0m
+[93mHash[0m            3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/libraries/Hash[0m
+
+[92mUsed platform[0m [92mVersion[0m [90mPath[0m
+[93mesp32:esp32[0m   3.3.8   [90m/Users/sriramshashank/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8[0m

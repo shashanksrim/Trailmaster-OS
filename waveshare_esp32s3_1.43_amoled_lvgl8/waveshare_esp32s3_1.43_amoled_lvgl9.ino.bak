@@ -1,0 +1,346 @@
+/**
+ * PROJECT: JIMNY DASH V3 (ULTIMATE EDITION)
+ * Features: Anti-Lag Caching, Dynamic Arc Colors, Speedometer Color States, Core 0 OBD
+ */
+
+#define LV_CONF_INCLUDE_SIMPLE
+#include <lvgl.h>
+#include <math.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include "amoled.h"   
+#include "FT3168.h"   
+#include "ui.h"       
+#include "qmi8658c.h" 
+#include "screen_ui.h"
+#include "screen_game.h"
+#include "retro_engine.h"
+#include "screen_inclinometer.h"
+#include "PhotoFrameApp.h"
+#include <FFat.h>
+
+extern Amoled amoled; 
+
+extern "C" {
+    #include "ui.h"
+    extern lv_obj_t * ui_uiimgRoll;
+    extern lv_obj_t * ui_uiimgPitch;
+    extern lv_obj_t * ui_CarRollImg;   
+    extern lv_obj_t * ui_CarPitchImg;
+    extern lv_obj_t * ui_enginetemplabel;
+    extern lv_obj_t * ui_oiltemplabel; 
+    extern lv_obj_t * ui_batterylabel;
+    extern lv_obj_t * ui_rpmlabel;
+    extern lv_obj_t * ui_speedlabel;
+    extern lv_obj_t * ui_rpmarc;
+    extern lv_obj_t * ui_Engine_temp;
+    extern lv_obj_t * ui_oiltemp;   
+    extern lv_obj_t * ui_uiScreenGame; 
+
+    void app_start_dino_game(lv_event_t * e);
+    void app_dino_jump_trigger(lv_event_t * e);
+    void stop_dino_game(lv_event_t * e);
+    void load_inclinometer_mode(lv_event_t * e);
+    void load_ui_mode(lv_event_t * e);
+    void app_zero_inclinometer(lv_event_t * e);
+    void app_imageframe(lv_event_t * e);
+    void app_settings(lv_event_t * e);
+}
+
+static lv_disp_draw_buf_t draw_buf;
+static lv_disp_drv_t disp_drv;
+static lv_indev_drv_t indev_drv;
+
+#define SCREEN_WIDTH  466
+#define SCREEN_HEIGHT 466
+#define LVGL_DRAW_BUF_SIZE (SCREEN_WIDTH * 46) 
+
+lv_color_t *lvgl_buf1 = nullptr;
+lv_color_t *lvgl_buf2 = nullptr;
+
+enum DeviceMode { MODE_UI, MODE_GAME, MODE_INCLINOMETER, MODE_PHOTOFRAME, MODE_EMULATOR };
+volatile DeviceMode currentMode = MODE_UI;
+
+bool imu_ready = false;
+float current_pitch = 0.0, current_roll = 0.0;
+float pitch_offset = 0.0, roll_offset = 0.0;
+unsigned long last_imu_time = 0;
+#define IMU_ALPHA 0.96 
+
+volatile int car_engine_temp = 0;
+volatile int car_engine_load = 0; 
+volatile float car_voltage = 0.0;
+volatile int car_rpm = 0;
+volatile int car_speed = 0;
+
+const char* obd_ssid = "WiFi_OBDII"; 
+const char* obd_ip = "192.168.0.10";
+const uint16_t obd_port = 35000;
+
+uint16_t touch_start_y = 0;
+uint32_t last_restart_time = 0;
+lv_obj_t * last_screen_before_launcher = NULL;
+lv_obj_t * ui_launcher_close_btn = NULL;
+
+void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p);
+void my_touch_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data);
+lv_color_t get_dynamic_color(float percent);
+
+void read_obd_response(WiFiClient& client, char* buffer, size_t max_len) {
+    unsigned long timeout = millis() + 1500; 
+    int len = 0;
+    while (millis() < timeout) {
+        if (client.available()) {
+            char c = client.read();
+            if (c == '\r' || c == '\n') continue; 
+            if (c == '>') { buffer[len] = '\0'; break; }
+            if (len < max_len - 1) buffer[len++] = c;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1)); 
+    }
+    buffer[len] = '\0';
+}
+
+void obdBackgroundWorker(void *pvParameters) {
+    WiFiClient client;
+    char rx_buf[64];
+    while(1) {
+        if (currentMode == MODE_PHOTOFRAME || currentMode == MODE_EMULATOR) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+        if (WiFi.status() != WL_CONNECTED) {
+            WiFi.disconnect(true, true);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            WiFi.mode(WIFI_STA);
+            esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
+            IPAddress local_IP(192, 168, 0, 11);
+            IPAddress gateway(192, 168, 0, 10);
+            IPAddress subnet(255, 255, 255, 0);
+            WiFi.config(local_IP, gateway, subnet);
+            WiFi.begin(obd_ssid);
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 20) { vTaskDelay(pdMS_TO_TICKS(500)); attempts++; }
+            if (WiFi.status() != WL_CONNECTED) continue; 
+        }
+        if (!client.connected()) {
+            if (client.connect(obd_ip, obd_port)) {
+                client.print("ATZ\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                client.print("ATE E0\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
+            } else { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+        }
+        client.print("0105\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
+        char* pt = strstr(rx_buf, "41 05");
+        if (pt) { int a; if (sscanf(pt, "41 05 %x", &a) == 1) car_engine_temp = a - 40; }
+        vTaskDelay(pdMS_TO_TICKS(50));
+        client.print("010C\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
+        pt = strstr(rx_buf, "41 0C");
+        if (pt) { int a, b; if (sscanf(pt, "41 0C %x %x", &a, &b) == 2) car_rpm = ((a * 256) + b) / 4; }
+        vTaskDelay(pdMS_TO_TICKS(50));
+        client.print("010D\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
+        pt = strstr(rx_buf, "41 0D");
+        if (pt) { int a; if (sscanf(pt, "41 0D %x", &a) == 1) car_speed = a; }
+        vTaskDelay(pdMS_TO_TICKS(100)); 
+    }
+}
+
+void exit_launcher() {
+    if (last_screen_before_launcher) {
+        lv_scr_load_anim(last_screen_before_launcher, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+        // Sync currentMode if we know what screen we went back to
+        if (last_screen_before_launcher == ui_uiScreenGame) currentMode = MODE_GAME;
+        else if (last_screen_before_launcher == ui_uiinclinometer) currentMode = MODE_INCLINOMETER;
+        else if (last_screen_before_launcher == photoframe_screen) currentMode = MODE_PHOTOFRAME;
+        else currentMode = MODE_UI;
+    }
+}
+
+static void launcher_overscroll_cb(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_GESTURE) {
+        lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+        if (dir == LV_DIR_TOP) { // Swipe UP (finger moves up)
+            lv_obj_t * panel = lv_event_get_target(e);
+            // Check if we are at the bottom of the scroll
+            // lv_obj_get_scroll_bottom returns pixels remaining to scroll. If 0, we are at the bottom.
+            if (lv_obj_get_scroll_bottom(panel) <= 5) { 
+                exit_launcher();
+            }
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Touch_Init(); 
+    if (!amoled.begin()) { Serial.println("AMOLED Init Failed!"); while (1); }
+    RetroEngine::begin();
+    lv_init();
+    lvgl_buf1 = (lv_color_t *)heap_caps_malloc(LVGL_DRAW_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    lvgl_buf2 = (lv_color_t *)heap_caps_malloc(LVGL_DRAW_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    lv_disp_draw_buf_init(&draw_buf, lvgl_buf1, lvgl_buf2, LVGL_DRAW_BUF_SIZE);
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = SCREEN_WIDTH; disp_drv.ver_res = SCREEN_HEIGHT;
+    disp_drv.flush_cb = my_disp_flush; disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER; indev_drv.read_cb = my_touch_read;
+    lv_indev_drv_register(&indev_drv);
+    
+    show_boot_splash(); ui_init();
+    // Launcher initialization
+    if(ui_Panel1) {
+        lv_obj_set_scroll_snap_y(ui_Panel1, LV_SCROLL_SNAP_CENTER);
+        lv_obj_set_style_pad_top(ui_Panel1, 125, 0); lv_obj_set_style_pad_bottom(ui_Panel1, 125, 0);
+        lv_obj_add_event_cb(ui_Panel1, launcher_overscroll_cb, LV_EVENT_ALL, NULL);
+        
+        // Dynamic "Sega Retro" Button
+        lv_obj_t * btnSega = lv_btn_create(ui_Panel1);
+        lv_obj_set_width(btnSega, 405); lv_obj_set_height(btnSega, 83);
+        lv_obj_set_style_bg_color(btnSega, lv_color_hex(0x0000FF), 0); // Sega Blue
+        lv_obj_set_style_bg_opa(btnSega, 150, 0);
+        lv_obj_set_style_radius(btnSega, 15, 0);
+        lv_obj_t * lblSega = lv_label_create(btnSega);
+        lv_label_set_text(lblSega, "Sega Retro");
+        lv_obj_set_style_text_font(lblSega, &ui_font_rajdhani1, 0);
+        lv_obj_center(lblSega);
+        
+        lv_obj_add_event_cb(btnSega, [](lv_event_t * e) {
+            // Logic to switch to SMS Emulator mode
+            extern void start_sms_emulator();
+            start_sms_emulator();
+        }, LV_EVENT_CLICKED, NULL);
+    }
+    // Capture the last screen whenever we enter the launcher
+    if (ui_uilauncher) {
+        lv_obj_add_event_cb(ui_uilauncher, [](lv_event_t * e) {
+            lv_obj_t * prev = lv_scr_act();
+            if (prev && prev != ui_uilauncher) {
+                last_screen_before_launcher = prev;
+            }
+        }, LV_EVENT_SCREEN_LOAD_START, NULL);
+    }
+
+    photoframe_setup(); build_photoframe_screen();
+    if (ui_uiinclinometer) lv_obj_add_event_cb(ui_uiinclinometer, app_zero_inclinometer, LV_EVENT_CLICKED, NULL);
+    if (ui_uiScreenGame) lv_obj_add_event_cb(ui_uiScreenGame, app_dino_jump_trigger, LV_EVENT_PRESSED, NULL);
+    
+    xTaskCreatePinnedToCore(obdBackgroundWorker, "OBD_Task", 8192, NULL, 1, NULL, 0);
+}
+
+void loop() {
+    static uint32_t last_tick = 0;
+    uint32_t current_time = millis();
+    lv_tick_inc(current_time - last_tick);
+    last_tick = current_time;
+    lv_timer_handler(); 
+    lv_obj_t * act_scr = lv_scr_act();
+    
+    extern void update_sms_emulator();
+    update_sms_emulator();
+
+    if (act_scr == ui_uiinclinometer) { 
+        if (currentMode != MODE_INCLINOMETER) load_inclinometer_mode(NULL); update_screen_inclinometer(); 
+    } else if (act_scr == ui_uiScreenGame) { 
+        if (currentMode != MODE_GAME) { app_start_dino_game(NULL); } update_screen_game(); 
+    } else if (act_scr == ui_uispeedometer || act_scr == ui_uigauge) { 
+        if (currentMode != MODE_UI) load_ui_mode(NULL); update_screen_ui(); 
+    } else if (act_scr == photoframe_screen) { if (currentMode != MODE_PHOTOFRAME) currentMode = MODE_PHOTOFRAME; }
+    
+    extern lv_obj_t * ui_emulator_screen;
+    if (act_scr == ui_emulator_screen) {
+        if (currentMode != MODE_EMULATOR) currentMode = MODE_EMULATOR;
+    }
+    
+    photoframe_loop_handler();
+    delay(2);
+}
+
+void my_touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+    uint16_t x, y;
+    static bool p_state = false;
+    if (getTouch(&x, &y)) {
+        if (!p_state) { touch_start_y = y; p_state = true; }
+        // SWIPE DOWN TO LAUNCHER (from any screen except launcher itself)
+        if (lv_scr_act() != ui_uilauncher && (y - touch_start_y > 100)) {
+            switch_to_launcher();
+            if (currentMode == MODE_GAME) { void stop_dino_game(lv_event_t * e); stop_dino_game(NULL); }
+            if (currentMode == MODE_PHOTOFRAME) { stop_photoframe_wifi(); }
+            p_state = false; return; 
+        }
+        // SWIPE UP TO EXIT LAUNCHER
+        if (lv_scr_act() == ui_uilauncher && (touch_start_y - y > 100)) {
+            if (ui_Panel1 && lv_obj_get_scroll_bottom(ui_Panel1) <= 10) {
+                exit_launcher();
+                p_state = false; return;
+            }
+        }
+
+        extern void sms_handle_touch(int start_y, int end_y, int start_x, int end_x, bool released);
+        sms_handle_touch(touch_start_y, y, 0, x, false); // Simplified x mapping
+
+        data->point.x = x; data->point.y = y; data->state = LV_INDEV_STATE_PR; 
+    } else { 
+        p_state = false; data->state = LV_INDEV_STATE_REL; 
+        extern void sms_handle_touch(int start_y, int end_y, int start_x, int end_x, bool released);
+        sms_handle_touch(0, 0, 0, 0, true);
+    }
+}
+
+void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p) {
+    uint32_t len = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    for (uint32_t i = 0; i < len; i++) {
+        uint16_t color = color_p[i].full;
+        color_p[i].full = (color << 8) | (color >> 8);
+    }
+    amoled.drawArea(area->x1, area->y1, area->x2, area->y2, (uint16_t *)color_p);
+    lv_disp_flush_ready(drv);
+}
+
+lv_color_t get_dynamic_color(float percent) {
+    if (percent < 0.0f) percent = 0.0f;
+    if (percent > 1.0f) percent = 1.0f;
+    if (percent < 0.40f) return lv_color_make(0, 150, 255); 
+    if (percent < 0.80f) return lv_color_make(0, 255, 0);   
+    return lv_color_make(255, 0, 0);                        
+}
+
+extern float jump_vel;
+extern float current_sped;
+extern float dino_y;
+
+extern "C" {
+    void app_start_dino_game(lv_event_t * e) {
+        currentMode = MODE_GAME; is_game_over = false;
+        reset_obstacles();
+        game_timer = millis(); amoled.fillScreen(0xFFFF); 
+        last_restart_time = millis(); 
+    }
+    void stop_dino_game(lv_event_t * e) { currentMode = MODE_UI; amoled.fillScreen(0x0000); }
+    void app_dino_jump_trigger(lv_event_t * e) {
+        if (currentMode != MODE_GAME) return;
+        if (is_game_over) {
+            if (millis() - death_time > 2000) { app_start_dino_game(NULL); }
+        } else if (!is_jumping) { 
+            if (millis() - last_restart_time > 200) {
+                is_jumping = true; 
+                jump_vel = -8.5; 
+            }
+        }
+    }
+    void load_inclinometer_mode(lv_event_t * e) {
+        currentMode = MODE_INCLINOMETER; if (!imu_ready) {
+            if(qmi8658_init()) { qmi8658_config_reg(0); qmi8658_enableSensors(QMI8658_ACCGYR_ENABLE); imu_ready = true; last_imu_time = millis(); }
+        }
+    }
+    void load_ui_mode(lv_event_t * e) { currentMode = MODE_UI; }
+    void app_zero_inclinometer(lv_event_t * e) { pitch_offset = current_pitch; roll_offset = current_roll; }
+    void app_imageframe(lv_event_t * e) { currentMode = MODE_PHOTOFRAME; switch_to_photoframe(); }
+    void app_settings(lv_event_t * e) {}
+    void switch_to_launcher() {
+        if (ui_uilauncher) {
+            lv_obj_t * current = lv_scr_act();
+            if (current != ui_uilauncher) last_screen_before_launcher = current; 
+            lv_scr_load_anim(ui_uilauncher, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+            load_ui_mode(NULL);
+        }
+    }
+}

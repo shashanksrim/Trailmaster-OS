@@ -1,0 +1,382 @@
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600&display=swap');
+  :root {
+    --dirt: #c8a96e;
+    --dirt-dim: #7a5e35;
+    --bg: #0d0f0e;
+    --surface: #141a17;
+    --surface2: #1c2620;
+    --ring: #2a3d33;
+    --accent: #4ade80;
+    --accent2: #f97316;
+    --accent3: #38bdf8;
+    --text: #d6e8d0;
+    --muted: #5a7060;
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #111; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Rajdhani', sans-serif; }
+  .scene { display: flex; gap: 48px; align-items: center; flex-wrap: wrap; justify-content: center; padding: 2rem; }
+  .device-wrap { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .device-label { font-size: 12px; color: #555; letter-spacing: 2px; text-transform: uppercase; font-family: 'Share Tech Mono', monospace; }
+  .device { width: 260px; height: 260px; border-radius: 50%; background: #0a0c0b; border: 6px solid #1e2b23; position: relative; overflow: hidden; box-shadow: 0 0 0 2px #2a3d33, 0 0 40px rgba(0,0,0,0.8), inset 0 0 30px rgba(0,0,0,0.6); cursor: pointer; }
+  .contour-bg { position: absolute; inset: 0; border-radius: 50%; }
+  .launcher { position: absolute; inset: 0; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.4s; }
+  .swipe-hint { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .swipe-arrow { display: flex; flex-direction: column; align-items: center; gap: 3px; opacity: 0.5; animation: pulse 2s infinite; }
+  .swipe-arrow span { display: block; width: 2px; height: 8px; background: var(--accent); border-radius: 1px; }
+  .swipe-arrow span:nth-child(1) { opacity: 0.3; }
+  .swipe-arrow span:nth-child(2) { opacity: 0.6; }
+  .swipe-arrow span:nth-child(3) { opacity: 1; }
+  .swipe-label { font-size: 9px; color: var(--muted); letter-spacing: 2px; text-transform: uppercase; font-family: 'Share Tech Mono', monospace; }
+  .status-ring { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; }
+  .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: 0.8; }
+  .dot:nth-child(2) { opacity: 0.4; }
+  .dot:nth-child(3) { opacity: 0.2; }
+  @keyframes pulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
+
+  .app-grid { display: none; position: absolute; inset: 0; border-radius: 50%; flex-direction: column; align-items: center; justify-content: center; gap: 0; padding: 20px; }
+  .app-grid.active { display: flex; }
+  .launcher.hidden { opacity: 0; pointer-events: none; display: none; }
+
+  .grid-row { display: flex; gap: 10px; justify-content: center; }
+  .app-icon { width: 48px; height: 48px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--ring); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; cursor: pointer; transition: all 0.15s; position: relative; overflow: hidden; }
+  .app-icon:hover { background: #253228; border-color: var(--accent); transform: scale(1.08); }
+  .app-icon svg { width: 20px; height: 20px; flex-shrink: 0; }
+  .app-icon .app-lbl { font-size: 7px; color: var(--muted); letter-spacing: 0.5px; text-transform: uppercase; font-family: 'Share Tech Mono', monospace; line-height: 1; }
+  .app-icon.accent-green { border-color: rgba(74,222,128,0.4); }
+  .app-icon.accent-green svg { color: var(--accent); }
+  .app-icon.accent-orange { border-color: rgba(249,115,22,0.4); }
+  .app-icon.accent-orange svg { color: var(--accent2); }
+  .app-icon.accent-blue { border-color: rgba(56,189,248,0.4); }
+  .app-icon.accent-blue svg { color: var(--accent3); }
+  .app-icon.accent-red { border-color: rgba(248,113,113,0.3); }
+  .app-icon.accent-red svg { color: var(--danger); }
+
+  .topbar { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; }
+  .topbar-time { font-size: 10px; color: var(--text); font-family: 'Share Tech Mono', monospace; }
+  .topbar-sep { width: 1px; height: 10px; background: var(--ring); }
+  .topbar-gps { display: flex; align-items: center; gap: 2px; }
+  .gps-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: blink 1.5s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+  .close-btn { position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); width: 28px; height: 5px; border-radius: 3px; background: var(--ring); cursor: pointer; transition: background 0.15s; }
+  .close-btn:hover { background: var(--muted); }
+
+  .preview-panel { width: 320px; background: #0d0f0e; border: 1px solid #1e2b23; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+  .preview-title { font-size: 11px; color: #444; letter-spacing: 2px; text-transform: uppercase; font-family: 'Share Tech Mono', monospace; }
+  .app-list { display: flex; flex-direction: column; gap: 6px; }
+  .app-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 8px; background: #141a17; border: 1px solid #1e2b23; cursor: pointer; transition: all 0.15s; }
+  .app-row:hover { background: #1c2620; border-color: #2a3d33; }
+  .app-row-icon { width: 30px; height: 30px; border-radius: 7px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .app-row-info { flex: 1; }
+  .app-row-name { font-size: 13px; color: var(--text); font-weight: 500; line-height: 1; }
+  .app-row-sub { font-size: 10px; color: var(--muted); font-family: 'Share Tech Mono', monospace; margin-top: 2px; }
+  .app-row-badge { font-size: 9px; padding: 2px 6px; border-radius: 4px; font-family: 'Share Tech Mono', monospace; text-transform: uppercase; }
+  .badge-green { background: rgba(74,222,128,0.1); color: var(--accent); border: 1px solid rgba(74,222,128,0.2); }
+  .badge-orange { background: rgba(249,115,22,0.1); color: var(--accent2); border: 1px solid rgba(249,115,22,0.2); }
+  .badge-blue { background: rgba(56,189,248,0.1); color: var(--accent3); border: 1px solid rgba(56,189,248,0.2); }
+  .badge-red { background: rgba(248,113,113,0.1); color: var(--danger); border: 1px solid rgba(248,113,113,0.2); }
+  .badge-gray { background: rgba(90,112,96,0.15); color: var(--muted); border: 1px solid rgba(90,112,96,0.2); }
+
+  .section-divider { display: flex; align-items: center; gap: 8px; }
+  .section-divider span { font-size: 9px; color: #333; letter-spacing: 1.5px; text-transform: uppercase; font-family: 'Share Tech Mono', monospace; }
+  .section-divider::before, .section-divider::after { content:''; flex:1; height:1px; background:#1e2b23; }
+
+  .lvgl-note { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: rgba(74,222,128,0.04); border: 1px solid rgba(74,222,128,0.1); border-radius: 8px; }
+  .lvgl-note svg { width: 14px; height: 14px; color: var(--accent); flex-shrink: 0; margin-top: 1px; }
+  .lvgl-note p { font-size: 11px; color: var(--muted); font-family: 'Share Tech Mono', monospace; line-height: 1.5; }
+</style>
+
+<div class="scene">
+
+  <div class="device-wrap">
+    <div class="device" id="device">
+      <svg class="contour-bg" viewBox="0 0 260 260" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <clipPath id="circ"><circle cx="130" cy="130" r="130"/></clipPath>
+          <radialGradient id="vgr" cx="50%" cy="50%"><stop offset="0%" stop-color="#0d1a12" stop-opacity="0"/><stop offset="100%" stop-color="#010503" stop-opacity="0.9"/></radialGradient>
+        </defs>
+        <g clip-path="url(#circ)">
+          <rect width="260" height="260" fill="#0a0c0b"/>
+          <ellipse cx="130" cy="115" rx="70" ry="55" fill="none" stroke="#1a2e20" stroke-width="0.7" opacity="0.6"/>
+          <ellipse cx="130" cy="115" rx="88" ry="68" fill="none" stroke="#162418" stroke-width="0.7" opacity="0.55"/>
+          <ellipse cx="130" cy="115" rx="105" ry="83" fill="none" stroke="#132116" stroke-width="0.8" opacity="0.5"/>
+          <ellipse cx="130" cy="115" rx="122" ry="98" fill="none" stroke="#0f1d12" stroke-width="0.7" opacity="0.45"/>
+          <ellipse cx="130" cy="115" rx="140" ry="114" fill="none" stroke="#0c1a10" stroke-width="0.8" opacity="0.4"/>
+          <ellipse cx="130" cy="115" rx="158" ry="130" fill="none" stroke="#0a170e" stroke-width="0.7" opacity="0.35"/>
+
+          <ellipse cx="90" cy="160" rx="50" ry="35" fill="none" stroke="#182c1e" stroke-width="0.6" opacity="0.3"/>
+          <ellipse cx="90" cy="160" rx="65" ry="48" fill="none" stroke="#152719" stroke-width="0.6" opacity="0.25"/>
+          <ellipse cx="170" cy="150" rx="40" ry="30" fill="none" stroke="#182c1e" stroke-width="0.6" opacity="0.25"/>
+
+          <path d="M0,180 Q40,155 80,170 Q120,185 160,165 Q200,145 260,155 L260,260 L0,260 Z" fill="#0e1811" opacity="0.5"/>
+          <path d="M0,195 Q50,178 100,188 Q150,198 200,182 Q230,174 260,178 L260,260 L0,260 Z" fill="#0c160f" opacity="0.4"/>
+          <path d="M0,210 Q60,200 120,205 Q180,210 260,200 L260,260 L0,260 Z" fill="#0a1410" opacity="0.35"/>
+
+          <rect width="260" height="260" fill="url(#vgr)"/>
+        </g>
+      </svg>
+
+      <div class="launcher" id="launcher">
+        <div class="topbar">
+          <span class="topbar-time" id="clock">09:41</span>
+          <div class="topbar-sep"></div>
+          <div class="topbar-gps"><div class="gps-dot"></div></div>
+        </div>
+
+        <div class="swipe-hint">
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="16" cy="16" r="14" stroke="#2a3d33" stroke-width="1"/>
+            <circle cx="16" cy="16" r="9" stroke="#2a3d33" stroke-width="0.5"/>
+            <circle cx="16" cy="16" r="3" fill="#4ade80" opacity="0.9"/>
+            <line x1="16" y1="2" x2="16" y2="7" stroke="#2a3d33" stroke-width="1"/>
+            <line x1="16" y1="25" x2="16" y2="30" stroke="#2a3d33" stroke-width="1"/>
+            <line x1="2" y1="16" x2="7" y2="16" stroke="#2a3d33" stroke-width="1"/>
+            <line x1="25" y1="16" x2="30" y2="16" stroke="#2a3d33" stroke-width="1"/>
+          </svg>
+          <div class="swipe-arrow">
+            <span></span><span></span><span></span>
+          </div>
+          <span class="swipe-label">swipe</span>
+        </div>
+
+        <div class="status-ring">
+          <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+        </div>
+      </div>
+
+      <div class="app-grid" id="appGrid">
+        <div class="topbar">
+          <span class="topbar-time" style="font-size:9px;color:#5a7060;">APPS</span>
+        </div>
+
+        <div class="grid-row" style="margin-top:8px;">
+          <div class="app-icon accent-green" title="Gauges">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 14a2 2 0 100-4 2 2 0 000 4z"/><path d="M12 4a8 8 0 018 8H4a8 8 0 018-8z"/><path d="M12 14l-3-3"/></svg>
+            <span class="app-lbl">gauges</span>
+          </div>
+          <div class="app-icon accent-orange" title="Speedometer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 12l-4-4"/><path d="M7.5 7.5L12 12"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+            <span class="app-lbl">speed</span>
+          </div>
+          <div class="app-icon accent-blue" title="Inclinometer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 3v2M12 19v2"/></svg>
+            <span class="app-lbl">incline</span>
+          </div>
+        </div>
+
+        <div class="grid-row" style="margin-top:8px;">
+          <div class="app-icon accent-orange" title="Altitude">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 18l5-8 4 5 3-4 6 7H3z"/></svg>
+            <span class="app-lbl">altitude</span>
+          </div>
+          <div class="app-icon accent-green" title="Compass">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/><path d="M15 9l-3 3-2-2" stroke-linecap="round"/></svg>
+            <span class="app-lbl">compass</span>
+          </div>
+          <div class="app-icon accent-red" title="Engine">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="8" width="14" height="8" rx="1"/><path d="M17 10h2l2 2-2 2h-2"/><path d="M7 8V6M11 8V6"/><path d="M3 12H1"/></svg>
+            <span class="app-lbl">engine</span>
+          </div>
+        </div>
+
+        <div class="grid-row" style="margin-top:8px;">
+          <div class="app-icon accent-blue" title="GPS Track">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+            <span class="app-lbl">gps</span>
+          </div>
+          <div class="app-icon accent-green" title="Tire Pressure">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+            <span class="app-lbl">tpms</span>
+          </div>
+          <div class="app-icon" style="border-color:#2a3d33;" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#5a7060" stroke-width="1.5"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            <span class="app-lbl">settings</span>
+          </div>
+        </div>
+
+        <div class="close-btn" id="closeBtn"></div>
+      </div>
+    </div>
+    <div class="device-label">← swipe down to open</div>
+  </div>
+
+  <div class="preview-panel">
+    <p class="preview-title">App Manifest</p>
+
+    <div class="section-divider"><span>sensors</span></div>
+    <div class="app-list">
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(74,222,128,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.5"><path d="M12 14a2 2 0 100-4 2 2 0 000 4z"/><path d="M12 4a8 8 0 018 8H4a8 8 0 018-8z"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">Multi-Gauge</div>
+          <div class="app-row-sub">RPM · temp · oil · voltage</div>
+        </div>
+        <span class="app-row-badge badge-green">live</span>
+      </div>
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(249,115,22,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 12l-4-4"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">Speedometer</div>
+          <div class="app-row-sub">GPS · OBD2 · km/h · mph</div>
+        </div>
+        <span class="app-row-badge badge-orange">gps</span>
+      </div>
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(56,189,248,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">Inclinometer</div>
+          <div class="app-row-sub">pitch · roll · IMU sensor</div>
+        </div>
+        <span class="app-row-badge badge-blue">imu</span>
+      </div>
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(74,222,128,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">Compass</div>
+          <div class="app-row-sub">magnetic heading · bearing</div>
+        </div>
+        <span class="app-row-badge badge-green">mag</span>
+      </div>
+    </div>
+
+    <div class="section-divider"><span>terrain</span></div>
+    <div class="app-list">
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(249,115,22,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="1.5"><path d="M3 18l5-8 4 5 3-4 6 7H3z"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">Altitude</div>
+          <div class="app-row-sub">barometric · GPS elevation</div>
+        </div>
+        <span class="app-row-badge badge-orange">baro</span>
+      </div>
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(56,189,248,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.5"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">GPS Track</div>
+          <div class="app-row-sub">trail log · waypoints</div>
+        </div>
+        <span class="app-row-badge badge-blue">gnss</span>
+      </div>
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(74,222,128,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">TPMS</div>
+          <div class="app-row-sub">tire pressure · 4-wheel</div>
+        </div>
+        <span class="app-row-badge badge-green">ble</span>
+      </div>
+    </div>
+
+    <div class="section-divider"><span>system</span></div>
+    <div class="app-list">
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(248,113,113,0.08);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="1.5"><rect x="3" y="8" width="14" height="8" rx="1"/><path d="M17 10h2l2 2-2 2h-2"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">Engine Monitor</div>
+          <div class="app-row-sub">OBD2 · fault codes · EGT</div>
+        </div>
+        <span class="app-row-badge badge-red">obd2</span>
+      </div>
+      <div class="app-row">
+        <div class="app-row-icon" style="background:rgba(90,112,96,0.1);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5a7060" stroke-width="1.5"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </div>
+        <div class="app-row-info">
+          <div class="app-row-name">Settings</div>
+          <div class="app-row-sub">display · sensors · BT · wifi</div>
+        </div>
+        <span class="app-row-badge badge-gray">sys</span>
+      </div>
+    </div>
+
+    <div class="lvgl-note">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+      <p>LVGL v8+ · ESP32-S3 · round display<br>lv_obj circular clip · swipe gesture via lv_indev · 240×240px</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const device = document.getElementById('device');
+  const launcher = document.getElementById('launcher');
+  const appGrid = document.getElementById('appGrid');
+  const closeBtn = document.getElementById('closeBtn');
+
+  let startY = null;
+  let isOpen = false;
+
+  function open() {
+    isOpen = true;
+    launcher.classList.add('hidden');
+    appGrid.classList.add('active');
+  }
+  function close() {
+    isOpen = false;
+    appGrid.classList.remove('active');
+    launcher.classList.remove('hidden');
+  }
+
+  device.addEventListener('mousedown', e => { startY = e.clientY; });
+  device.addEventListener('touchstart', e => { startY = e.touches[0].clientY; });
+
+  device.addEventListener('mouseup', e => {
+    if (startY !== null && !isOpen) {
+      const dy = e.clientY - startY;
+      if (dy > 18) open();
+    }
+    startY = null;
+  });
+  device.addEventListener('touchend', e => {
+    if (startY !== null && !isOpen) {
+      const dy = e.changedTouches[0].clientY - startY;
+      if (dy > 18) open();
+    }
+    startY = null;
+  });
+
+  closeBtn.addEventListener('click', e => { e.stopPropagation(); close(); });
+
+  setInterval(() => {
+    const now = new Date();
+    const h = String(now.getHours()).padStart(2,'0');
+    const m = String(now.getMinutes()).padStart(2,'0');
+    const el = document.getElementById('clock');
+    if (el) el.textContent = h + ':' + m;
+  }, 1000);
+
+  const icons = document.querySelectorAll('.app-icon');
+  icons.forEach(icon => {
+    icon.addEventListener('click', () => {
+      const name = icon.getAttribute('title') || 'App';
+      sendPrompt('Show me the ' + name + ' screen design for the circular LVGL display');
+    });
+  });
+
+  const rows = document.querySelectorAll('.app-row');
+  rows.forEach(row => {
+    row.addEventListener('click', () => {
+      const name = row.querySelector('.app-row-name')?.textContent || 'App';
+      sendPrompt('Show me the ' + name + ' screen design for the circular LVGL display');
+    });
+  });
+</script>

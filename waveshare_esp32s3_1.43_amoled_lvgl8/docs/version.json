@@ -1,0 +1,6 @@
+{
+  "version": "3.0",
+  "changelog": "Initial OTA-enabled release. WiFi-based automatic firmware updates. SD card auto-update support.",
+  "firmware_url": "https://github.com/sriramshashank/hellojimny/releases/download/v3.0/firmware.bin",
+  "sd_files": []
+}
