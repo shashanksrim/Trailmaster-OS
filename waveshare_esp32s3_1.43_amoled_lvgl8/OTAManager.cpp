@@ -8,6 +8,7 @@
 #include "sd_card_bsp.h"
 #include <esp_wifi.h>
 #include "ota_logic.h"   // version_is_newer(), json_get_str() — also unit-tested on host
+#include <sys/stat.h>    // mkdir() for creating SD subdirectories during sd_files sync
 
 // ── Config ────────────────────────────────────────────────────────────────────
 // This URL points to docs/version.json on your GitHub Pages site.
@@ -440,6 +441,15 @@ static void download_sd_files() {
         int fcode = fhttp.GET();
         if (fcode == 200) {
             String full_path = String("/sd_card") + sd_path;
+            // Create any intermediate directories (fopen won't make them)
+            {
+                char tmp[160];
+                strncpy(tmp, full_path.c_str(), sizeof(tmp) - 1);
+                tmp[sizeof(tmp) - 1] = '\0';
+                for (char* p = tmp + 1; *p; p++) {
+                    if (*p == '/') { *p = '\0'; mkdir(tmp, 0777); *p = '/'; }
+                }
+            }
             FILE* fp = fopen(full_path.c_str(), "wb");
             if (fp) {
                 WiFiClient* fstream = fhttp.getStreamPtr();

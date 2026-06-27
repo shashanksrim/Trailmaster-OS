@@ -335,15 +335,15 @@ void pf_show_upload_overlay(void) {
     lv_obj_center(pf_upload_overlay);
 
     lv_obj_t * btn_close = lv_btn_create(pf_upload_overlay);
-    lv_obj_set_size(btn_close, 76, 76);
+    lv_obj_set_size(btn_close, 60, 60);
     lv_obj_set_style_radius(btn_close, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(btn_close, lv_color_hex(0x444444), 0);
-    lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 28);
-    lv_obj_set_ext_click_area(btn_close, 28);   // enlarge tap target so it closes first try
+    lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 15);
+    lv_obj_set_ext_click_area(btn_close, 36);   // small button, large invisible tap target
     lv_obj_move_foreground(btn_close);
     lv_obj_t * lbl_x = lv_label_create(btn_close);
     lv_label_set_text(lbl_x, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lbl_x, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(lbl_x, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_x);
     lv_obj_add_event_cb(btn_close, [](lv_event_t * ev) {
         lv_event_code_t c = lv_event_get_code(ev);
@@ -401,14 +401,18 @@ void pf_show_upload_overlay(void) {
 static void pf_close_upload_overlay(void) {
     if (!upload_overlay_open) return;
     upload_overlay_open = false;
-    stop_photoframe_wifi();
 
+    // Remove the overlay and force an immediate redraw FIRST so the close feels
+    // instant — otherwise the blocking WiFi shutdown below makes it linger ~2s.
     if (pf_upload_overlay && lv_obj_is_valid(pf_upload_overlay)) {
         lv_obj_del(pf_upload_overlay);
     }
     pf_upload_overlay = NULL;
+    lv_refr_now(NULL);
 
-    // amoled.fillScreen(AMOLED_COLOR_BLACK);
+    // Now tear down the AP (this call can block for a second or two).
+    stop_photoframe_wifi();
+
     pf_apply_carousel_refresh_after_upload();
 }
 

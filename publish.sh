@@ -31,11 +31,18 @@ MANIFEST="$REPO_ROOT/docs/manifest.json"
 FW_DEST="$REPO_ROOT/firmware.bin"
 FW_URL="https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/firmware.bin"
 
-# --prepare : do the file prep but DON'T commit/push — leaves that to GitHub Desktop.
+# Flags (any order, before the .bin path):
+#   --prepare / -p : do the file prep but DON'T commit/push (use GitHub Desktop)
+#   --with-sd      : also (re)generate the sd_files OTA list from the sd_files/ folder
 PREPARE_ONLY=0
-if [ "${1:-}" = "--prepare" ] || [ "${1:-}" = "-p" ]; then
-  PREPARE_ONLY=1; shift
-fi
+WITH_SD=0
+while [ "${1:-}" = "--prepare" ] || [ "${1:-}" = "-p" ] || [ "${1:-}" = "--with-sd" ]; do
+  case "$1" in
+    --prepare|-p) PREPARE_ONLY=1 ;;
+    --with-sd)    WITH_SD=1 ;;
+  esac
+  shift
+done
 
 if [ $# -lt 1 ]; then
   echo "Usage: ./publish.sh [--prepare] <path-to-exported.bin> [\"changelog\"]" >&2
@@ -79,6 +86,12 @@ if [ -f "$MANIFEST" ]; then
   echo "==> docs/manifest.json version synced"
 fi
 
+# Optionally (re)build the SD-file OTA list from sd_files/ contents.
+if [ "$WITH_SD" = "1" ]; then
+  python3 "$REPO_ROOT/gen_sd_manifest.py"
+  echo "==> sd_files OTA list generated from sd_files/"
+fi
+
 if [ "$PREPARE_ONLY" = "1" ]; then
   echo "==> Files prepared for v$VERSION."
   echo "    Open GitHub Desktop -> review the changed files -> commit -> Push origin."
@@ -87,7 +100,7 @@ if [ "$PREPARE_ONLY" = "1" ]; then
 fi
 
 cd "$REPO_ROOT"
-git add firmware.bin version.json waveshare_esp32s3_1.43_amoled_lvgl8/version.h docs/manifest.json
+git add firmware.bin version.json waveshare_esp32s3_1.43_amoled_lvgl8/version.h docs/manifest.json sd_files gen_sd_manifest.py
 git commit -m "Release v$VERSION: $CHANGELOG"
 git push origin main
 

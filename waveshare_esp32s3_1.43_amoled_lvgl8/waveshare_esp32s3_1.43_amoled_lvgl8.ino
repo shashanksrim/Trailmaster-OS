@@ -665,17 +665,14 @@ static void ota_overlay_close() {
 
 static void ota_overlay_refresh(lv_timer_t * t) {
     const OTAStatus* st = ota_get_status();
+    // Single, consistent palette: neutral text (red only on failure), grey
+    // progress bar, orange action button — no per-state colour switching.
     if (ota_ov_status && lv_obj_is_valid(ota_ov_status)) {
         lv_label_set_text(ota_ov_status, st->status_text);
-        uint32_t col = 0xCCCCCC;
-        if (st->state == OTA_UP_TO_DATE)              col = 0x00CC66;
-        else if (st->state == OTA_UPDATE_AVAILABLE)   col = 0xFF9500;
-        else if (st->state == OTA_DOWNLOADING_FW ||
-                 st->state == OTA_DOWNLOADING_SD)      col = 0x4488FF;
-        else if (st->state == OTA_FAILED_NO_WIFI ||
-                 st->state == OTA_FAILED_SERVER ||
-                 st->state == OTA_FAILED_FLASH)        col = 0xFF3333;
-        lv_obj_set_style_text_color(ota_ov_status, lv_color_hex(col), 0);
+        bool failed = (st->state == OTA_FAILED_NO_WIFI ||
+                       st->state == OTA_FAILED_SERVER ||
+                       st->state == OTA_FAILED_FLASH);
+        lv_obj_set_style_text_color(ota_ov_status, lv_color_hex(failed ? 0xFF3333 : 0xCCCCCC), 0);
     }
     if (ota_ov_bar && lv_obj_is_valid(ota_ov_bar))
         lv_bar_set_value(ota_ov_bar, st->progress, LV_ANIM_ON);
@@ -686,14 +683,12 @@ static void ota_overlay_refresh(lv_timer_t * t) {
                      st->state == OTA_DOWNLOADING_SD || st->state == OTA_REBOOTING);
         if (busy) {
             lv_obj_add_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
-        } else if (st->state == OTA_UPDATE_AVAILABLE) {
-            lv_obj_clear_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text_fmt(ota_ov_btn_lbl, "Install v%s", st->available_version);
-            lv_obj_set_style_bg_color(ota_ov_btn, lv_color_hex(0x00AA44), 0);
         } else {
             lv_obj_clear_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(ota_ov_btn_lbl, "Check Again");
-            lv_obj_set_style_bg_color(ota_ov_btn, lv_color_hex(0xFF6A00), 0);
+            if (st->state == OTA_UPDATE_AVAILABLE)
+                lv_label_set_text_fmt(ota_ov_btn_lbl, "Install v%s", st->available_version);
+            else
+                lv_label_set_text(ota_ov_btn_lbl, "Check Again");
         }
     }
 }
@@ -717,16 +712,16 @@ void show_ota_update_overlay() {
         ota_ov_btn = NULL; ota_ov_btn_lbl = NULL;
     }, LV_EVENT_DELETE, NULL);
 
-    // Close (X) — large with an extended touch area so it's easy to tap
+    // Close (X) — small button, large invisible tap target so it's easy to hit
     lv_obj_t * btn_x = lv_btn_create(ota_overlay);
-    lv_obj_set_size(btn_x, 76, 76);
+    lv_obj_set_size(btn_x, 56, 56);
     lv_obj_set_style_radius(btn_x, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(btn_x, lv_color_hex(0x333333), 0);
-    lv_obj_align(btn_x, LV_ALIGN_TOP_MID, 0, 30);
-    lv_obj_set_ext_click_area(btn_x, 28);   // enlarge the tap target beyond the visible circle
+    lv_obj_align(btn_x, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_set_ext_click_area(btn_x, 36);   // enlarge the tap target beyond the visible circle
     lv_obj_t * lx = lv_label_create(btn_x);
     lv_label_set_text(lx, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lx, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(lx, &lv_font_montserrat_20, 0);
     lv_obj_center(lx);
     lv_obj_add_event_cb(btn_x, [](lv_event_t * e) {
         lv_event_code_t c = lv_event_get_code(e);
@@ -738,7 +733,7 @@ void show_ota_update_overlay() {
     lv_label_set_text(title, "SOFTWARE UPDATE");
     lv_obj_set_style_text_font(title, &ui_font_rajdhani1, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 92);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 124);  // clear of the top close (X) button
 
     // Status (centered, wraps)
     ota_ov_status = lv_label_create(ota_overlay);
