@@ -649,6 +649,140 @@ void build_settings_screen() {
 }
 
 
+// ─── OTA UPDATE OVERLAY ──────────────────────────────────────────────────────
+// Full-screen overlay that shows update status/progress (instead of a label
+// under the button). Opening it kicks off the version check automatically.
+static lv_obj_t * ota_overlay     = NULL;
+static lv_obj_t * ota_ov_status   = NULL;
+static lv_obj_t * ota_ov_bar      = NULL;
+static lv_obj_t * ota_ov_btn      = NULL;
+static lv_obj_t * ota_ov_btn_lbl  = NULL;
+static lv_timer_t * ota_ov_timer  = NULL;
+
+static void ota_overlay_close() {
+    if (ota_overlay && lv_obj_is_valid(ota_overlay)) lv_obj_del(ota_overlay); // DELETE cb clears the rest
+}
+
+static void ota_overlay_refresh(lv_timer_t * t) {
+    const OTAStatus* st = ota_get_status();
+    if (ota_ov_status && lv_obj_is_valid(ota_ov_status)) {
+        lv_label_set_text(ota_ov_status, st->status_text);
+        uint32_t col = 0xCCCCCC;
+        if (st->state == OTA_UP_TO_DATE)              col = 0x00CC66;
+        else if (st->state == OTA_UPDATE_AVAILABLE)   col = 0xFF9500;
+        else if (st->state == OTA_DOWNLOADING_FW ||
+                 st->state == OTA_DOWNLOADING_SD)      col = 0x4488FF;
+        else if (st->state == OTA_FAILED_NO_WIFI ||
+                 st->state == OTA_FAILED_SERVER ||
+                 st->state == OTA_FAILED_FLASH)        col = 0xFF3333;
+        lv_obj_set_style_text_color(ota_ov_status, lv_color_hex(col), 0);
+    }
+    if (ota_ov_bar && lv_obj_is_valid(ota_ov_bar))
+        lv_bar_set_value(ota_ov_bar, st->progress, LV_ANIM_ON);
+
+    if (ota_ov_btn && lv_obj_is_valid(ota_ov_btn) && ota_ov_btn_lbl) {
+        bool busy = (st->state == OTA_SCANNING_WIFI || st->state == OTA_CONNECTING_WIFI ||
+                     st->state == OTA_CHECKING_VERSION || st->state == OTA_DOWNLOADING_FW ||
+                     st->state == OTA_DOWNLOADING_SD || st->state == OTA_REBOOTING);
+        if (busy) {
+            lv_obj_add_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
+        } else if (st->state == OTA_UPDATE_AVAILABLE) {
+            lv_obj_clear_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(ota_ov_btn_lbl, "Install v%s", st->available_version);
+            lv_obj_set_style_bg_color(ota_ov_btn, lv_color_hex(0x00AA44), 0);
+        } else {
+            lv_obj_clear_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(ota_ov_btn_lbl, "Check Again");
+            lv_obj_set_style_bg_color(ota_ov_btn, lv_color_hex(0xFF6A00), 0);
+        }
+    }
+}
+
+void show_ota_update_overlay() {
+    if (ota_overlay) return; // already open
+
+    ota_overlay = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(ota_overlay, 466, 466);
+    lv_obj_center(ota_overlay);
+    lv_obj_set_style_bg_color(ota_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(ota_overlay, 255, 0);
+    lv_obj_set_style_border_width(ota_overlay, 0, 0);
+    lv_obj_clear_flag(ota_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Clean up timer + pointers whenever the overlay is destroyed (X or screen change)
+    lv_obj_add_event_cb(ota_overlay, [](lv_event_t * e) {
+        if (lv_event_get_code(e) != LV_EVENT_DELETE) return;
+        if (ota_ov_timer) { lv_timer_del(ota_ov_timer); ota_ov_timer = NULL; }
+        ota_overlay = NULL; ota_ov_status = NULL; ota_ov_bar = NULL;
+        ota_ov_btn = NULL; ota_ov_btn_lbl = NULL;
+    }, LV_EVENT_DELETE, NULL);
+
+    // Close (X)
+    lv_obj_t * btn_x = lv_btn_create(ota_overlay);
+    lv_obj_set_size(btn_x, 56, 56);
+    lv_obj_set_style_radius(btn_x, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(btn_x, lv_color_hex(0x333333), 0);
+    lv_obj_align(btn_x, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_t * lx = lv_label_create(btn_x);
+    lv_label_set_text(lx, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(lx, &lv_font_montserrat_20, 0);
+    lv_obj_center(lx);
+    lv_obj_add_event_cb(btn_x, [](lv_event_t * e) {
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) ota_overlay_close();
+    }, LV_EVENT_ALL, NULL);
+
+    // Title
+    lv_obj_t * title = lv_label_create(ota_overlay);
+    lv_label_set_text(title, "SOFTWARE UPDATE");
+    lv_obj_set_style_text_font(title, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 92);
+
+    // Status (centered, wraps)
+    ota_ov_status = lv_label_create(ota_overlay);
+    lv_label_set_long_mode(ota_ov_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(ota_ov_status, 360);
+    lv_obj_set_style_text_align(ota_ov_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(ota_ov_status, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_color(ota_ov_status, lv_color_hex(0xCCCCCC), 0);
+    lv_label_set_text(ota_ov_status, "Starting update check...");
+    lv_obj_align(ota_ov_status, LV_ALIGN_CENTER, 0, -20);
+
+    // Progress bar
+    ota_ov_bar = lv_bar_create(ota_overlay);
+    lv_obj_set_size(ota_ov_bar, 320, 16);
+    lv_obj_align(ota_ov_bar, LV_ALIGN_CENTER, 0, 44);
+    lv_bar_set_range(ota_ov_bar, 0, 100);
+    lv_bar_set_value(ota_ov_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(ota_ov_bar, lv_color_hex(0x222222), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ota_ov_bar, lv_color_hex(0xFF6A00), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(ota_ov_bar, 8, LV_PART_MAIN);
+    lv_obj_set_style_radius(ota_ov_bar, 8, LV_PART_INDICATOR);
+
+    // Action button (Check Again / Install vX)
+    ota_ov_btn = lv_btn_create(ota_overlay);
+    lv_obj_set_size(ota_ov_btn, 300, 60);
+    lv_obj_align(ota_ov_btn, LV_ALIGN_CENTER, 0, 112);
+    lv_obj_set_style_bg_color(ota_ov_btn, lv_color_hex(0xFF6A00), 0);
+    lv_obj_set_style_radius(ota_ov_btn, 14, 0);
+    ota_ov_btn_lbl = lv_label_create(ota_ov_btn);
+    lv_label_set_text(ota_ov_btn_lbl, "Check Again");
+    lv_obj_set_style_text_font(ota_ov_btn_lbl, &ui_font_rajdhani1, 0);
+    lv_obj_center(ota_ov_btn_lbl);
+    lv_obj_add_event_cb(ota_ov_btn, [](lv_event_t * e) {
+        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+        const OTAStatus* st = ota_get_status();
+        if (st->state == OTA_UPDATE_AVAILABLE) ota_install();
+        else                                    ota_check_for_update();
+    }, LV_EVENT_ALL, NULL);
+
+    lv_obj_move_foreground(ota_overlay);
+    ota_ov_timer = lv_timer_create(ota_overlay_refresh, 400, NULL);
+
+    // Kick off the check immediately
+    ota_check_for_update();
+}
+
 // ─── ABOUT SCREEN ────────────────────────────────────────────────────────────
 static lv_obj_t * about_screen = NULL;
 
@@ -873,88 +1007,27 @@ void build_about_screen() {
     lv_obj_set_style_text_font(lbl_btn_check, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_btn_check);
 
-    // 2. Status row
-    lv_obj_t * row_status = lv_obj_create(scr_rows);
-    lv_obj_set_size(row_status, 430, 60);
-    lv_obj_set_style_bg_color(row_status, lv_color_hex(0x111111), 0);
-    lv_obj_set_style_bg_opa(row_status, 255, 0);
-    lv_obj_set_style_border_width(row_status, 1, 0);
-    lv_obj_set_style_border_color(row_status, lv_color_hex(0x222222), 0);
-    lv_obj_set_style_radius(row_status, 12, 0);
-    lv_obj_clear_flag(row_status, LV_OBJ_FLAG_SCROLLABLE);
-    static lv_obj_t * lbl_ota_status = NULL;
-    lbl_ota_status = lv_label_create(row_status);
-    const char * current_status = ota_get_status()->status_text;
-    lv_label_set_text(lbl_ota_status, strlen(current_status) > 0 ? current_status : "Ready for update check...");
-    lv_obj_set_style_text_font(lbl_ota_status, &ui_font_rajdhani1, 0);
-    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0x888888), 0);
-    lv_obj_align(lbl_ota_status, LV_ALIGN_LEFT_MID, 14, 0);
-    lv_label_set_long_mode(lbl_ota_status, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_width(lbl_ota_status, 400);
-
-    // 3. Wi-Fi Setup button (opens hotspot + web portal to add a network for OTA)
+    // 2. "Wifi settings" — text button that opens the hotspot/QR overlay
     lv_obj_t * btn_wifi = lv_btn_create(scr_rows);
-    lv_obj_set_size(btn_wifi, 64, 64);
+    lv_obj_set_size(btn_wifi, 400, 56);
     lv_obj_set_style_bg_color(btn_wifi, lv_color_hex(0x1A1A1A), 0);
     lv_obj_set_style_border_width(btn_wifi, 1, 0);
     lv_obj_set_style_border_color(btn_wifi, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_radius(btn_wifi, 32, 0); // circle
+    lv_obj_set_style_radius(btn_wifi, 14, 0);
     lv_obj_t * lbl_wifi = lv_label_create(btn_wifi);
-    lv_label_set_text(lbl_wifi, LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_20, 0);
+    lv_label_set_text(lbl_wifi, "Wifi settings");
+    lv_obj_set_style_text_font(lbl_wifi, &ui_font_rajdhani1, 0);
     lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0xFFFFFF), 0);
     lv_obj_center(lbl_wifi);
 
-    // Caption so it's obvious this is where you add WiFi for updates
-    lv_obj_t * cap_wifi = lv_label_create(scr_rows);
-    lv_label_set_text(cap_wifi, "Wi-Fi Setup");
-    lv_obj_set_style_text_font(cap_wifi, &ui_font_rajdhani1, 0);
-    lv_obj_set_style_text_color(cap_wifi, lv_color_hex(0x888888), 0);
-
     extern void pf_show_upload_overlay(void);
     lv_obj_add_event_cb(btn_wifi, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-            pf_show_upload_overlay();
-        }
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
     }, LV_EVENT_ALL, NULL);
 
-    // Periodically refresh status label from the OTA background task
-    lv_timer_create([](lv_timer_t * t) {
-        if (!lbl_ota_status || !lv_obj_is_valid(lbl_ota_status)) return;
-        const OTAStatus* st = ota_get_status();
-        lv_label_set_text(lbl_ota_status, st->status_text);
-        // Change colour based on state
-        uint32_t col = 0x888888;
-        if (st->state == OTA_UP_TO_DATE)        col = 0x00CC66;
-        if (st->state == OTA_UPDATE_AVAILABLE)   col = 0xFF9500;
-        if (st->state == OTA_DOWNLOADING_FW ||
-            st->state == OTA_DOWNLOADING_SD)     col = 0x4488FF;
-        if (st->state == OTA_FAILED_NO_WIFI ||
-            st->state == OTA_FAILED_SERVER ||
-            st->state == OTA_FAILED_FLASH)       col = 0xFF3333;
-        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(col), 0);
-
-        // Change button label based on state
-        if (!lbl_btn_check || !lv_obj_is_valid(lbl_btn_check)) return;
-        if (st->state == OTA_UPDATE_AVAILABLE) {
-            char buf[48];
-            snprintf(buf, sizeof(buf), "Install v%s", st->available_version);
-            lv_label_set_text(lbl_btn_check, buf);
-            lv_obj_set_style_bg_color(btn_check, lv_color_hex(0x00AA44), 0);
-        } else {
-            lv_label_set_text(lbl_btn_check, "Check for Update");
-            lv_obj_set_style_bg_color(btn_check, lv_color_hex(0xFF6A00), 0);
-        }
-    }, 750, NULL);
-
+    // "Check for Update" opens the OTA overlay; all status/progress shows there.
     lv_obj_add_event_cb(btn_check, [](lv_event_t * e) {
-        if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
-        const OTAStatus* st = ota_get_status();
-        if (st->state == OTA_UPDATE_AVAILABLE) {
-            ota_install();
-        } else {
-            ota_check_for_update();
-        }
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) show_ota_update_overlay();
     }, LV_EVENT_ALL, NULL);
 
 

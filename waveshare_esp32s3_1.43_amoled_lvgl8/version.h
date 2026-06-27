@@ -7,6 +7,6 @@
 #define APP_STRING "Nofrendo"
 #endif  
 
-#define APP_VERSION "3.1"
+#define APP_VERSION "3.2"
 
 #endif

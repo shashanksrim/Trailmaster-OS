@@ -1,6 +1,6 @@
 {
-  "version": "3.1",
-  "changelog": "Trailmaster-OS firmware",
+  "version": "3.2",
+  "changelog": "OTA status overlay, Wifi settings button, WiFi credentials saved to SD card",
   "firmware_url": "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/firmware.bin",
   "sd_files": []
 }

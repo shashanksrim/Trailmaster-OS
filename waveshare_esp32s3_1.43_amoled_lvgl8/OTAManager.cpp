@@ -32,28 +32,94 @@ static void set_status(OTAState state, int progress, const char* text) {
     Serial.printf("[OTA] %s\n", text);
 }
 
+// ── SD-card persistence (survives firmware re-flash) ───────────────────────────
+// WiFi networks are saved to the SD card as lines of "SSID<TAB>PASSWORD" so they
+// outlive any firmware flash (NVS can be wiped by a full chip erase; the SD card
+// is independent storage). NVS is still written as a backup.
+#define OTA_WIFI_FILE "/sd_card/wifi.txt"
+
+static int sd_load_networks(char ssids[][33], char passes[][65], int max_count) {
+    FILE* f = fopen(OTA_WIFI_FILE, "r");
+    if (!f) return 0;
+    int n = 0;
+    char line[160];
+    while (n < max_count && fgets(line, sizeof(line), f)) {
+        char* nl = strpbrk(line, "\r\n"); if (nl) *nl = '\0';
+        if (line[0] == '\0') continue;
+        char* tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        strncpy(ssids[n], line, 32);     ssids[n][32]  = '\0';
+        strncpy(passes[n], tab + 1, 64); passes[n][64] = '\0';
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static void sd_save_networks(char ssids[][33], char passes[][65], int count) {
+    FILE* f = fopen(OTA_WIFI_FILE, "w");
+    if (!f) { Serial.println("[OTA] WARN: could not write wifi.txt to SD"); return; }
+    for (int i = 0; i < count; i++) fprintf(f, "%s\t%s\n", ssids[i], passes[i]);
+    fclose(f);
+}
+
+// One-time migration: if the SD file is absent but NVS holds networks, copy them
+// to SD so previously-saved credentials survive future flashes.
+static void migrate_nvs_to_sd() {
+    FILE* f = fopen(OTA_WIFI_FILE, "r");
+    if (f) { fclose(f); return; } // SD file already present — nothing to migrate
+    Preferences prefs; prefs.begin(OTA_NVS_NS, true);
+    char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
+    int n = 0;
+    for (int i = 0; i < OTA_MAX_NETWORKS; i++) {
+        char ks[16], kp[16];
+        snprintf(ks, sizeof(ks), "ssid_%d", i); snprintf(kp, sizeof(kp), "pass_%d", i);
+        String s = prefs.getString(ks, ""); if (s == "") continue;
+        String p = prefs.getString(kp, "");
+        strncpy(ssids[n], s.c_str(), 32);  ssids[n][32]  = '\0';
+        strncpy(passes[n], p.c_str(), 64); passes[n][64] = '\0';
+        n++;
+    }
+    prefs.end();
+    if (n > 0) { sd_save_networks(ssids, passes, n); Serial.printf("[OTA] Migrated %d network(s) NVS->SD\n", n); }
+}
+
 // ── WiFi Network Storage ──────────────────────────────────────────────────────
 void ota_init() {
     memset(&s_status, 0, sizeof(s_status));
     s_status.state = OTA_IDLE;
     strncpy(s_status.status_text, "Tap to check for updates", sizeof(s_status.status_text) - 1);
+    migrate_nvs_to_sd();  // preserve any creds saved before the SD-persistence update
 }
 
 void ota_add_network(const char* ssid, const char* password) {
+    migrate_nvs_to_sd();
+
+    // --- SD (primary, survives reflash) ---
+    char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
+    int n = sd_load_networks(ssids, passes, OTA_MAX_NETWORKS);
+    int slot = -1;
+    for (int i = 0; i < n; i++) if (strcmp(ssids[i], ssid) == 0) { slot = i; break; }
+    if (slot < 0 && n < OTA_MAX_NETWORKS) slot = n++;
+    if (slot >= 0) {
+        strncpy(ssids[slot], ssid, 32);     ssids[slot][32]  = '\0';
+        strncpy(passes[slot], password, 64); passes[slot][64] = '\0';
+        sd_save_networks(ssids, passes, n);
+        Serial.printf("[OTA] Saved network to SD: %s (slot %d)\n", ssid, slot);
+    }
+
+    // --- NVS (backup) ---
     Preferences prefs;
     prefs.begin(OTA_NVS_NS, false);
-
-    // Find existing slot for this SSID or a free slot
     for (int i = 0; i < OTA_MAX_NETWORKS; i++) {
         char key_ssid[16], key_pass[16];
         snprintf(key_ssid, sizeof(key_ssid), "ssid_%d", i);
         snprintf(key_pass, sizeof(key_pass), "pass_%d", i);
-
         String existing = prefs.getString(key_ssid, "");
         if (existing == "" || existing == ssid) {
             prefs.putString(key_ssid, ssid);
             prefs.putString(key_pass, password);
-            Serial.printf("[OTA] Saved network: %s (slot %d)\n", ssid, i);
             break;
         }
     }
@@ -61,6 +127,21 @@ void ota_add_network(const char* ssid, const char* password) {
 }
 
 void ota_remove_network(const char* ssid) {
+    migrate_nvs_to_sd();
+
+    // --- SD ---
+    char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
+    int n = sd_load_networks(ssids, passes, OTA_MAX_NETWORKS);
+    int w = 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(ssids[i], ssid) != 0) {
+            if (w != i) { strcpy(ssids[w], ssids[i]); strcpy(passes[w], passes[i]); }
+            w++;
+        }
+    }
+    sd_save_networks(ssids, passes, w);
+
+    // --- NVS ---
     Preferences prefs;
     prefs.begin(OTA_NVS_NS, false);
     for (int i = 0; i < OTA_MAX_NETWORKS; i++) {
@@ -70,28 +151,23 @@ void ota_remove_network(const char* ssid) {
         if (prefs.getString(key_ssid, "") == ssid) {
             prefs.remove(key_ssid);
             prefs.remove(key_pass);
-            Serial.printf("[OTA] Removed network: %s\n", ssid);
             break;
         }
     }
     prefs.end();
+    Serial.printf("[OTA] Removed network: %s\n", ssid);
 }
 
 int ota_list_networks(char ssids[][33], int max_count) {
-    Preferences prefs;
-    prefs.begin(OTA_NVS_NS, true);
+    migrate_nvs_to_sd();
+    char all_ssids[OTA_MAX_NETWORKS][33]; char all_passes[OTA_MAX_NETWORKS][65];
+    int n = sd_load_networks(all_ssids, all_passes, OTA_MAX_NETWORKS);
     int count = 0;
-    for (int i = 0; i < OTA_MAX_NETWORKS && count < max_count; i++) {
-        char key_ssid[16];
-        snprintf(key_ssid, sizeof(key_ssid), "ssid_%d", i);
-        String s = prefs.getString(key_ssid, "");
-        if (s != "") {
-            strncpy(ssids[count], s.c_str(), 32);
-            ssids[count][32] = '\0';
-            count++;
-        }
+    for (int i = 0; i < n && count < max_count; i++) {
+        strncpy(ssids[count], all_ssids[i], 32);
+        ssids[count][32] = '\0';
+        count++;
     }
-    prefs.end();
     return count;
 }
 
@@ -138,52 +214,43 @@ static bool connect_to_known_network() {
     }
     // -----------------------
 
-    Preferences prefs;
-    prefs.begin(OTA_NVS_NS, true);
-    
-    bool found_any_saved = false;
+    migrate_nvs_to_sd();
+    char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
+    int net_count = sd_load_networks(ssids, passes, OTA_MAX_NETWORKS);
+    bool found_any_saved = (net_count > 0);
     Serial.println("[OTA] Attempting to connect to saved WiFi networks...");
 
     // Try to connect to each saved network directly
-    for (int i = 0; i < OTA_MAX_NETWORKS; i++) {
-        char key_ssid[16], key_pass[16];
-        snprintf(key_ssid, sizeof(key_ssid), "ssid_%d", i);
-        snprintf(key_pass, sizeof(key_pass), "pass_%d", i);
-        String saved_ssid = prefs.getString(key_ssid, "");
-        if (saved_ssid == "") continue;
-
-        found_any_saved = true;
-        String saved_pass = prefs.getString(key_pass, "");
+    for (int i = 0; i < net_count; i++) {
+        const char* saved_ssid = ssids[i];
+        const char* saved_pass = passes[i];
 
         char buf[64];
-        snprintf(buf, sizeof(buf), "Connecting to %s...", saved_ssid.c_str());
+        snprintf(buf, sizeof(buf), "Connecting to %s...", saved_ssid);
         set_status(OTA_CONNECTING_WIFI, 10, buf);
-        
-        Serial.printf("[OTA] Trying network %d: '%s' with password '%s'\n", i, saved_ssid.c_str(), saved_pass.c_str());
 
-        WiFi.begin(saved_ssid.c_str(), saved_pass.c_str());
+        Serial.printf("[OTA] Trying network %d: '%s'\n", i, saved_ssid);
+
+        WiFi.begin(saved_ssid, saved_pass);
         unsigned long t = millis();
         // Wait up to OTA_WIFI_TIMEOUT_MS (15 seconds) to establish connection
         while (WiFi.status() != WL_CONNECTED && millis() - t < OTA_WIFI_TIMEOUT_MS) {
             delay(500);
             Serial.printf("[OTA] WiFi Status: %d\n", WiFi.status());
         }
-        
+
         if (WiFi.status() == WL_CONNECTED) {
-            snprintf(buf, sizeof(buf), "WiFi connected, checking GitHub...");
-            set_status(OTA_CHECKING_VERSION, 20, buf);
-            Serial.printf("[OTA] Successfully connected to %s. IP: %s\n", saved_ssid.c_str(), WiFi.localIP().toString().c_str());
-            prefs.end();
+            set_status(OTA_CHECKING_VERSION, 20, "WiFi connected, checking GitHub...");
+            Serial.printf("[OTA] Successfully connected to %s. IP: %s\n", saved_ssid, WiFi.localIP().toString().c_str());
             return true;
         }
-        
-        Serial.printf("[OTA] Failed to connect to %s (Final Status: %d). Moving to next...\n", saved_ssid.c_str(), WiFi.status());
-        
+
+        Serial.printf("[OTA] Failed to connect to %s (Final Status: %d). Moving to next...\n", saved_ssid, WiFi.status());
+
         // Failed to connect to this one — disconnect and try next
         WiFi.disconnect(false);
         delay(100);
     }
-    prefs.end();
 
     Serial.println("[OTA] Exhausted all saved networks. Connection failed.");
 

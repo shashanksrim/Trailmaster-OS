@@ -6,7 +6,9 @@
 # the repo root, so firmware.bin / version.json live right here).
 #
 # Usage:
-#   ./publish.sh <path-to-exported.bin> ["changelog text"]
+#   ./publish.sh <path-to-exported.bin> ["changelog text"]            # prep + push
+#   ./publish.sh --prepare <path-to-exported.bin> ["changelog text"]  # prep only,
+#       then commit + push in GitHub Desktop (review the diff first)
 #
 # Release flow (low-effort):
 #   1. Edit the version in  waveshare_esp32s3_1.43_amoled_lvgl8/version.h
@@ -29,8 +31,14 @@ MANIFEST="$REPO_ROOT/docs/manifest.json"
 FW_DEST="$REPO_ROOT/firmware.bin"
 FW_URL="https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/firmware.bin"
 
+# --prepare : do the file prep but DON'T commit/push — leaves that to GitHub Desktop.
+PREPARE_ONLY=0
+if [ "${1:-}" = "--prepare" ] || [ "${1:-}" = "-p" ]; then
+  PREPARE_ONLY=1; shift
+fi
+
 if [ $# -lt 1 ]; then
-  echo "Usage: ./publish.sh <path-to-exported.bin> [\"changelog\"]" >&2
+  echo "Usage: ./publish.sh [--prepare] <path-to-exported.bin> [\"changelog\"]" >&2
   exit 1
 fi
 BIN_SRC="$1"
@@ -69,6 +77,13 @@ echo "==> version.json updated"
 if [ -f "$MANIFEST" ]; then
   sed -i '' "s/\"version\": *\"[^\"]*\"/\"version\": \"$VERSION\"/" "$MANIFEST"
   echo "==> docs/manifest.json version synced"
+fi
+
+if [ "$PREPARE_ONLY" = "1" ]; then
+  echo "==> Files prepared for v$VERSION."
+  echo "    Open GitHub Desktop -> review the changed files -> commit -> Push origin."
+  echo "    (firmware.bin, version.json, docs/manifest.json, version.h)"
+  exit 0
 fi
 
 cd "$REPO_ROOT"
