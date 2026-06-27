@@ -717,18 +717,20 @@ void show_ota_update_overlay() {
         ota_ov_btn = NULL; ota_ov_btn_lbl = NULL;
     }, LV_EVENT_DELETE, NULL);
 
-    // Close (X)
+    // Close (X) — large with an extended touch area so it's easy to tap
     lv_obj_t * btn_x = lv_btn_create(ota_overlay);
-    lv_obj_set_size(btn_x, 56, 56);
+    lv_obj_set_size(btn_x, 76, 76);
     lv_obj_set_style_radius(btn_x, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(btn_x, lv_color_hex(0x333333), 0);
-    lv_obj_align(btn_x, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_align(btn_x, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_set_ext_click_area(btn_x, 28);   // enlarge the tap target beyond the visible circle
     lv_obj_t * lx = lv_label_create(btn_x);
     lv_label_set_text(lx, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lx, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lx, &lv_font_montserrat_24, 0);
     lv_obj_center(lx);
     lv_obj_add_event_cb(btn_x, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) ota_overlay_close();
+        lv_event_code_t c = lv_event_get_code(e);
+        if (c == LV_EVENT_CLICKED || c == LV_EVENT_RELEASED) ota_overlay_close();
     }, LV_EVENT_ALL, NULL);
 
     // Title
@@ -743,7 +745,7 @@ void show_ota_update_overlay() {
     lv_label_set_long_mode(ota_ov_status, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(ota_ov_status, 360);
     lv_obj_set_style_text_align(ota_ov_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(ota_ov_status, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(ota_ov_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(ota_ov_status, lv_color_hex(0xCCCCCC), 0);
     lv_label_set_text(ota_ov_status, "Starting update check...");
     lv_obj_align(ota_ov_status, LV_ALIGN_CENTER, 0, -20);
@@ -755,7 +757,7 @@ void show_ota_update_overlay() {
     lv_bar_set_range(ota_ov_bar, 0, 100);
     lv_bar_set_value(ota_ov_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(ota_ov_bar, lv_color_hex(0x222222), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(ota_ov_bar, lv_color_hex(0xFF6A00), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(ota_ov_bar, lv_color_hex(0x999999), LV_PART_INDICATOR);
     lv_obj_set_style_radius(ota_ov_bar, 8, LV_PART_MAIN);
     lv_obj_set_style_radius(ota_ov_bar, 8, LV_PART_INDICATOR);
 
@@ -765,6 +767,7 @@ void show_ota_update_overlay() {
     lv_obj_align(ota_ov_btn, LV_ALIGN_CENTER, 0, 112);
     lv_obj_set_style_bg_color(ota_ov_btn, lv_color_hex(0xFF6A00), 0);
     lv_obj_set_style_radius(ota_ov_btn, 14, 0);
+    lv_obj_add_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);  // hidden until refresh decides (prevents start flash)
     ota_ov_btn_lbl = lv_label_create(ota_ov_btn);
     lv_label_set_text(ota_ov_btn_lbl, "Check Again");
     lv_obj_set_style_text_font(ota_ov_btn_lbl, &ui_font_rajdhani1, 0);
@@ -982,9 +985,9 @@ void build_about_screen() {
 
     lv_obj_t * ver_lbl = lv_label_create(page2);
     lv_label_set_text_fmt(ver_lbl, "v%s", ota_current_version());
-    lv_obj_set_style_text_font(ver_lbl, &lv_font_montserrat_14, 0); // smaller font
-    lv_obj_set_style_text_color(ver_lbl, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_pad_top(ver_lbl, -5, 0); // Force closer to logo
+    lv_obj_set_style_text_font(ver_lbl, &lv_font_montserrat_24, 0); // larger, legible version
+    lv_obj_set_style_text_color(ver_lbl, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_pad_top(ver_lbl, 0, 0);
 
     lv_obj_t * scr_rows = page2;
 
@@ -1007,21 +1010,17 @@ void build_about_screen() {
     lv_obj_set_style_text_font(lbl_btn_check, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_btn_check);
 
-    // 2. "Wifi settings" — text button that opens the hotspot/QR overlay
-    lv_obj_t * btn_wifi = lv_btn_create(scr_rows);
-    lv_obj_set_size(btn_wifi, 400, 56);
-    lv_obj_set_style_bg_color(btn_wifi, lv_color_hex(0x1A1A1A), 0);
-    lv_obj_set_style_border_width(btn_wifi, 1, 0);
-    lv_obj_set_style_border_color(btn_wifi, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_radius(btn_wifi, 14, 0);
-    lv_obj_t * lbl_wifi = lv_label_create(btn_wifi);
+    // 2. "Wifi settings" — plain tappable text (no button box)
+    lv_obj_t * lbl_wifi = lv_label_create(scr_rows);
     lv_label_set_text(lbl_wifi, "Wifi settings");
     lv_obj_set_style_text_font(lbl_wifi, &ui_font_rajdhani1, 0);
-    lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_center(lbl_wifi);
+    lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_pad_ver(lbl_wifi, 14, 0);          // taller hit area
+    lv_obj_add_flag(lbl_wifi, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(lbl_wifi, 24);            // easier to tap
 
     extern void pf_show_upload_overlay(void);
-    lv_obj_add_event_cb(btn_wifi, [](lv_event_t * e) {
+    lv_obj_add_event_cb(lbl_wifi, [](lv_event_t * e) {
         if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
     }, LV_EVENT_ALL, NULL);
 

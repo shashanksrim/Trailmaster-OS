@@ -335,19 +335,22 @@ void pf_show_upload_overlay(void) {
     lv_obj_center(pf_upload_overlay);
 
     lv_obj_t * btn_close = lv_btn_create(pf_upload_overlay);
-    lv_obj_set_size(btn_close, 60, 60);
+    lv_obj_set_size(btn_close, 76, 76);
     lv_obj_set_style_radius(btn_close, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(btn_close, lv_color_hex(0x444444), 0);
-    lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 15);
+    lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 28);
+    lv_obj_set_ext_click_area(btn_close, 28);   // enlarge tap target so it closes first try
     lv_obj_move_foreground(btn_close);
     lv_obj_t * lbl_x = lv_label_create(btn_close);
     lv_label_set_text(lbl_x, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lbl_x, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_x, &lv_font_montserrat_24, 0);
     lv_obj_center(lbl_x);
     lv_obj_add_event_cb(btn_close, [](lv_event_t * ev) {
+        lv_event_code_t c = lv_event_get_code(ev);
+        if (c != LV_EVENT_CLICKED && c != LV_EVENT_RELEASED) return;
         if (lv_tick_elaps(upload_overlay_opened_ms) < 300) return;
         pf_close_upload_overlay();
-    }, LV_EVENT_RELEASED, NULL);
+    }, LV_EVENT_ALL, NULL);
 
     // Title removed as requested
 
