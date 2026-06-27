@@ -479,13 +479,14 @@ static void ota_task(void* param) {
     bool do_install = (param != NULL);
 
     if (do_install) {
-        // The version check disconnects WiFi when done, so re-establish it before
-        // downloading (otherwise the GET fails with a connection error / HTTP -1).
+        // Normally WiFi is still connected from the version check (we no longer
+        // disconnect after checking). If it dropped, reconnect — with one retry,
+        // since phone hotspots are slow to re-admit a client right after a reset.
         if (WiFi.status() != WL_CONNECTED) {
-            if (!connect_to_known_network()) {
-                vTaskDelete(NULL);
-                return;
-            }
+            set_status(OTA_CONNECTING_WIFI, 5, "Reconnecting WiFi...");
+            bool ok = connect_to_known_network();
+            if (!ok) { delay(2500); ok = connect_to_known_network(); }
+            if (!ok) { vTaskDelete(NULL); return; }
         }
         set_status(OTA_DOWNLOADING_FW, 0, "Downloading firmware...");
         // User confirmed install — proceed with firmware download
@@ -498,14 +499,13 @@ static void ota_task(void* param) {
         delay(1500);
         ESP.restart();
     } else {
-        // Just check version
+        // Just check version. Leave WiFi CONNECTED so a follow-up Install reuses
+        // it — reconnecting to a phone hotspot right after a disconnect is flaky.
         if (!connect_to_known_network()) {
             vTaskDelete(NULL);
             return;
         }
         fetch_version_info();
-        // Disconnect STA — keep AP running normally
-        WiFi.disconnect(false);
     }
 
     s_task_handle = NULL;
