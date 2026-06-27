@@ -414,6 +414,32 @@ void build_settings_screen() {
         if (brightness_level < 10) { brightness_level++; apply_brightness(); lv_label_set_text_fmt((lv_obj_t*)lv_event_get_user_data(e), "%d", brightness_level); }
     }, LV_EVENT_ALL, lbl_val);
 
+    // ─── ROW 1.4: Wi-Fi settings (opens hotspot/QR overlay) ─────────────────
+    lv_obj_t * row_wifi = lv_obj_create(scr_rows);
+    lv_obj_set_size(row_wifi, 430, 80);
+    lv_obj_set_style_bg_color(row_wifi, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(row_wifi, 255, 0);
+    lv_obj_set_style_border_width(row_wifi, 1, 0);
+    lv_obj_set_style_border_color(row_wifi, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(row_wifi, 12, 0);
+    lv_obj_clear_flag(row_wifi, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row_wifi, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t * lbl_wifi_s = lv_label_create(row_wifi);
+    lv_label_set_text(lbl_wifi_s, "Wifi settings");
+    lv_obj_set_style_text_font(lbl_wifi_s, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_color(lbl_wifi_s, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(lbl_wifi_s, LV_ALIGN_LEFT_MID, 14, 0);
+
+    lv_obj_t * arrow_wifi = lv_label_create(row_wifi);
+    lv_label_set_text(arrow_wifi, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow_wifi, lv_color_hex(0x888888), 0);
+    lv_obj_align(arrow_wifi, LV_ALIGN_RIGHT_MID, -18, 0);
+
+    lv_obj_add_event_cb(row_wifi, [](lv_event_t * e) {
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
+    }, LV_EVENT_ALL, NULL);
+
     // ─── ROW 1.5: Jimny Look Toggle ─────────────────────────────────────────
     lv_obj_t * row_logo = lv_obj_create(scr_rows);
     lv_obj_set_size(row_logo, 430, 80);
@@ -1788,9 +1814,15 @@ void setup() {
     // setup overlay with the hotspot already ON so the user can configure WiFi.
     lv_timer_t * onboarding = lv_timer_create([](lv_timer_t * t) {
         char ssids[8][33];
-        if (ota_list_networks(ssids, 8) == 0) {
+        bool no_creds = (ota_list_networks(ssids, 8) == 0);
+        // Empty SD card? (browser-flash leaves NVS creds intact, so also key off
+        // missing SD content — trailmaster.bmp is part of the standard SD set.)
+        FILE* fc = fopen("/sd_card/trailmaster.bmp", "r");
+        bool sd_missing = (fc == NULL);
+        if (fc) fclose(fc);
+        if (no_creds || sd_missing) {
             pf_autostart_wifi = true;
-            pf_show_upload_overlay();
+            pf_show_upload_overlay();   // overlay sits over the speedometer; X reveals it
         }
         lv_timer_del(t);
     }, 2000, NULL);
