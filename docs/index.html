@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trailmaster-OS — Firmware Flasher</title>
+  <style>
+    :root { --orange:#FF6A00; --bg:#0d0d0d; --card:#1a1a1a; --text:#f5f5f5; --muted:#888; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+      font-family:'Segoe UI',-apple-system,Roboto,Helvetica,Arial,sans-serif;
+      display:flex; flex-direction:column; align-items:center; padding:24px; }
+    .header { text-align:center; margin:24px 0 8px; }
+    .header h1 { margin:0; font-size:30px; letter-spacing:3px; text-transform:uppercase; }
+    .header h1 span { color:var(--orange); }
+    .header p { color:var(--muted); margin:6px 0 0; font-size:14px; }
+    .card { background:var(--card); border:1px solid #2a2a2a; border-radius:16px;
+      padding:28px; max-width:480px; width:100%; margin-top:24px; box-shadow:0 8px 24px rgba(0,0,0,.5); }
+    .ver { display:flex; align-items:baseline; gap:8px; justify-content:center; margin-bottom:20px; }
+    .ver .label { color:var(--muted); font-size:14px; }
+    .ver .num { color:var(--orange); font-size:28px; font-weight:700; }
+    .flash-wrap { display:flex; justify-content:center; margin:16px 0 8px; }
+    esp-web-install-button { --esp-tools-button-color:#fff; --esp-tools-button-text-color:#000; }
+    .steps { color:var(--muted); font-size:13px; line-height:1.7; margin-top:18px; }
+    .steps b { color:var(--text); }
+    .note { background:#2a1a0a; border:1px solid #5a3a10; color:#ffc38a; font-size:12.5px;
+      border-radius:10px; padding:12px 14px; margin-top:18px; line-height:1.5; }
+    .unsupported { display:none; color:#ff6b6b; font-size:13px; margin-top:12px; text-align:center; }
+    code { background:#000; padding:2px 6px; border-radius:5px; color:#9cf; }
+    footer { color:#555; font-size:12px; margin-top:28px; text-align:center; }
+    footer a { color:#777; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>TRAIL<span>MASTER</span></h1>
+    <p>ESP32-S3 Firmware Flasher</p>
+  </div>
+
+  <div class="card">
+    <div class="ver">
+      <span class="label">Latest firmware:</span>
+      <span class="num" id="ver">…</span>
+    </div>
+
+    <div class="flash-wrap">
+      <esp-web-install-button manifest="./manifest.json">
+        <button slot="activate" style="background:var(--orange);color:#fff;border:none;
+          padding:16px 28px;border-radius:12px;font-size:16px;font-weight:700;
+          text-transform:uppercase;letter-spacing:1px;cursor:pointer;">
+          ⚡ Flash via USB
+        </button>
+        <span slot="unsupported" class="unsupported" style="display:block">
+          Your browser can’t flash over USB. Use <b>Chrome</b> or <b>Edge</b> on a desktop.
+        </span>
+        <span slot="not-allowed" class="unsupported" style="display:block">
+          USB access was blocked. This page must be served over HTTPS.
+        </span>
+      </esp-web-install-button>
+    </div>
+
+    <div id="changelog" style="text-align:center;color:var(--muted);font-size:13px;min-height:16px;"></div>
+
+    <div class="steps">
+      <b>How to flash:</b><br>
+      1. Plug the device into this computer with a USB cable.<br>
+      2. Click <b>Flash via USB</b> above.<br>
+      3. In the popup, pick the port named like <code>usbmodem…</code> (or <code>USB JTAG/serial</code>).<br>
+      4. Wait for it to finish, then the device reboots into the new firmware.
+    </div>
+
+    <div class="note">
+      <b>Chrome or Edge on desktop only.</b> Web USB flashing isn’t supported in Safari,
+      Firefox, or on phones. Saved Wi-Fi networks are preserved (no full erase).
+    </div>
+  </div>
+
+  <footer>
+    Trailmaster-OS · After the first USB flash, future updates can install over the air
+    (device → About → Check for Update).<br>
+    <a href="https://github.com/shashanksrim/Trailmaster-OS" target="_blank">github.com/shashanksrim/Trailmaster-OS</a>
+  </footer>
+
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <script>
+    // Show the live version + changelog from the same version.json the OTA uses.
+    fetch("https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/version.json?t=" + Date.now())
+      .then(r => r.json())
+      .then(j => {
+        document.getElementById("ver").textContent = "v" + (j.version || "?");
+        if (j.changelog) document.getElementById("changelog").textContent = j.changelog;
+      })
+      .catch(() => { document.getElementById("ver").textContent = "v3.1"; });
+  </script>
+</body>
+</html>

@@ -25,6 +25,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION_H="$REPO_ROOT/waveshare_esp32s3_1.43_amoled_lvgl8/version.h"
 VERSION_JSON="$REPO_ROOT/version.json"
+MANIFEST="$REPO_ROOT/docs/manifest.json"
 FW_DEST="$REPO_ROOT/firmware.bin"
 FW_URL="https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/firmware.bin"
 
@@ -64,8 +65,14 @@ cat > "$VERSION_JSON" <<EOF
 EOF
 echo "==> version.json updated"
 
+# Keep the web-flasher manifest version in sync (cosmetic but tidy)
+if [ -f "$MANIFEST" ]; then
+  sed -i '' "s/\"version\": *\"[^\"]*\"/\"version\": \"$VERSION\"/" "$MANIFEST"
+  echo "==> docs/manifest.json version synced"
+fi
+
 cd "$REPO_ROOT"
-git add firmware.bin version.json waveshare_esp32s3_1.43_amoled_lvgl8/version.h
+git add firmware.bin version.json waveshare_esp32s3_1.43_amoled_lvgl8/version.h docs/manifest.json
 git commit -m "Release v$VERSION: $CHANGELOG"
 git push origin main
 
