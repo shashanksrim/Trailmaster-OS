@@ -1,11 +1,11 @@
 {
-  "version": "3.5",
-  "changelog": "SD-over-OTA test: downloads img_otatest.bin to SD",
+  "version": "3.6",
+  "changelog": "Add Trailmaster logo to image frame (SD over OTA)",
   "firmware_url": "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/firmware.bin",
   "sd_files": [
     {
-      "path": "/img_otatest.bin",
-      "url": "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/sd_files/img_otatest.bin"
+      "path": "/img_trailmaster.bin",
+      "url": "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/sd_files/img_trailmaster.bin"
     }
   ]
 }
