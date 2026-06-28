@@ -33,6 +33,12 @@ void app_settings(lv_event_t *e)         { (void)e; }
 void app_start_dino_game(lv_event_t *e)  { (void)e; }
 void app_zero_inclinometer(lv_event_t *e){ (void)e; }
 void build_rom_menu(void)                { }
+void build_settings_screen(void)         { }  // not yet extracted into the sim
+void build_about_screen(void)            { }  // not yet extracted into the sim
 void exit_launcher(void)                 { }
 void stop_all_games(void)                { }
 void switch_to_launcher(void)            { }
+
+// Grid launcher globals (shared grid_launcher_ui.h, included by sim_screens.cpp).
+lv_obj_t *grid_container = NULL;
+bool ignore_until_lift = false;

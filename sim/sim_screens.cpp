@@ -10,6 +10,7 @@
 #include "screen_ui.h"         // shared: build_speedo_rpm_gauge(), get_rpm_gauge_color()
 #include "godzilla_speedo_ui.h" // shared: build_godzilla_rpm_gauge(), godzilla_anim_cb(), open_speedo_settings_menu()
 #include "godzilla_placeholder.h" // static frame standing in for the animated car GIF
+#include "grid_launcher_ui.h"   // shared: build_grid_launcher() — the swipe-down app grid
 #include <emscripten.h>
 
 // OBD globals screen_ui.h expects (volatile, to match its extern declarations).
@@ -111,7 +112,10 @@ EMSCRIPTEN_KEEPALIVE void sim_set_rpm(int rpm) {
 EMSCRIPTEN_KEEPALIVE void sim_show_screen(int idx) {
     ota_overlay_close();   // clear any open overlay before switching
     switch (idx) {
-        case 0: lv_disp_load_scr(ui_uilauncher);     break;
+        case 0: lv_disp_load_scr(ui_uilauncher);
+                if (ui_Panel1) lv_obj_add_flag(ui_Panel1, LV_OBJ_FLAG_HIDDEN); // grid mode hides the list view (mirrors firmware setup())
+                build_grid_launcher();
+                break;
         case 1: lv_disp_load_scr(ui_uispeedometer);
                 { static bool built = false; if (!built) { build_speedo_rpm_gauge(ui_uispeedometer); built = true; } }
                 break;

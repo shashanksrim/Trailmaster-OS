@@ -17,7 +17,8 @@ UI_SRC=$(ls "$SKETCH"/ui*.c)
 emcc \
   -I"$DIR" -I"$SKETCH" -I"$LVGL" -I"$LVGL/src" \
   -DLV_CONF_INCLUDE_SIMPLE \
-  "$DIR/main.c" "$DIR/sim_screens.cpp" "$DIR/sim_ota_stub.cpp" "$DIR/sim_stubs.c" $UI_SRC $LVGL_SRC \
+  "$DIR/main.c" "$DIR/sim_screens.cpp" "$DIR/sim_ota_stub.cpp" "$DIR/sim_stubs.c" \
+  "$SKETCH/grid_icons.c" $UI_SRC $LVGL_SRC \
   -s USE_SDL=2 \
   -s WASM=1 \
   -s ALLOW_MEMORY_GROWTH=1 \
