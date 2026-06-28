@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trailmaster LVGL Simulator</title>
+<style>
+  body { background:#0d0d0d; color:#eee; font-family:'Segoe UI',system-ui,sans-serif;
+         margin:0; padding:18px; text-align:center; }
+  h1 { font-size:18px; letter-spacing:2px; margin:6px 0 14px; }
+  h1 span { color:#FF6A00; }
+  #bar { margin-bottom:18px; }
+  button { background:#1a1a1a; color:#eee; border:1px solid #444; border-radius:8px;
+           padding:9px 15px; margin:3px; cursor:pointer; font-size:14px; transition:.15s; }
+  button:hover { background:#FF6A00; color:#000; border-color:#FF6A00; }
+  /* Round-display mask: clip the 466x466 canvas to a circle like the AMOLED bezel */
+  #wrap { display:inline-block; width:466px; height:466px; border-radius:50%;
+          overflow:hidden; box-shadow:0 0 0 10px #000, 0 0 40px rgba(0,0,0,.8); }
+  canvas { display:block; background:#000; }
+  .hint { color:#666; font-size:12px; margin-top:14px; }
+  #sliders { margin-bottom:14px; color:#bbb; font-size:13px; }
+  #sliders input { vertical-align:middle; width:280px; accent-color:#FF6A00; }
+  #rpmval { color:#FF6A00; font-weight:bold; }
+</style>
+</head>
+<body>
+  <h1>TRAIL<span>MASTER</span> &middot; LVGL Simulator</h1>
+  <div id="bar">
+    <button onclick="S(0)">Launcher</button>
+    <button onclick="S(1)">Speedometer</button>
+    <button onclick="S(2)">Gauges</button>
+    <button onclick="S(3)">Inclinometer</button>
+    <button onclick="S(4)">OTA Overlay</button>
+    <button onclick="S(5)">Godzilla</button>
+  </div>
+  <div id="sliders">
+    <label>RPM <span id="rpmval">800</span>
+      <input type="range" min="0" max="8000" value="800" step="50" oninput="R(this.value)">
+    </label>
+  </div>
+  <div id="wrap">
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  </div>
+  <div class="hint">Real LVGL 8.3.11 compiled to WebAssembly &mdash; click a tab to switch screens, drag RPM on the Speedometer.</div>
+
+  <script>
+    function S(i) { if (window.Module && Module.ccall) Module.ccall('sim_show_screen', null, ['number'], [i]); }
+    function R(v) { document.getElementById('rpmval').textContent = v;
+                    if (window.Module && Module.ccall) Module.ccall('sim_set_rpm', null, ['number'], [parseInt(v)]); }
+    var Module = { canvas: document.getElementById('canvas') };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

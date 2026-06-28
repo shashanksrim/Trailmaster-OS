@@ -1,8 +1,12 @@
 #pragma once
+#ifndef LV_SIM_BUILD
 #include <Arduino.h>
+#endif
+#include <math.h>
 #include <lvgl.h>
 #include "ui.h"
 #include "ui_godzillaspeedometer.h"
+#include "godzilla_speedo_ui.h"   // map_rpm_to_arc_value() etc. — shared inline functions
 
 // Forward declarations for OBD variables mapped to UI
 extern volatile int car_engine_temp;
@@ -143,6 +147,9 @@ static inline void build_speedo_rpm_gauge(lv_obj_t * parent) {
     if (ui_visrpm) lv_obj_move_foreground(ui_visrpm);
 }
 
+// Live OBD->widget binding: uses millis()/Serial, so it's firmware-only. The
+// sim drives the same widgets via its own minimal updater (sim_screens.cpp).
+#ifndef LV_SIM_BUILD
 inline void update_screen_ui() {
     static uint32_t ui_refresh_timer = 0;
     
@@ -285,3 +292,4 @@ inline void update_screen_ui() {
         ui_refresh_timer = millis();
     }
 }
+#endif // !LV_SIM_BUILD
