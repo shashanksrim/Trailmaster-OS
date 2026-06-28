@@ -10,10 +10,10 @@ swapped out.
 
 | Layer | What | Reusable across | Status |
 |---|---|---|---|
-| L0 | SDL display canvas + mouse-as-touch | any program | done (`sim/main.c`) |
-| L1 | Board BSP shim: `Amoled`, `FT3168` (`getTouch`), `qmi8658c` — same public API as the real driver files | any sketch on this board | **not started** |
-| L2 | Arduino-ESP32 core shim: `Serial`, `millis`/`delay`, `Preferences`, `WiFi`, `SD`/`FFat`, FreeRTOS task fns, `HTTPClient`/`Update` | any ESP32 Arduino sketch | in progress (`emulator/core/`) |
-| L3 | Runtime bootstrap: call `setup()` once, `loop()` forever, pump SDL/LVGL events between | any program | not started |
+| L0 | SDL display canvas + mouse-as-touch | any program | done (`sim/main.c`); needs porting into `emulator/runtime/` |
+| L1 | Board BSP shim: `Amoled`, `FT3168` (`getTouch`), `qmi8658c` — same public API as the real driver files | any sketch on this board | **done & verified** (`emulator/board/*_sim.cpp`) — compile clean standalone against the real, unmodified headers |
+| L2 | Arduino-ESP32 core shim: `Serial`, `millis`/`delay`, `Preferences` done. **Still needed**: `WiFi`, `SD`/`FFat` (path-redirect `/sd_card` → local `sd_files/`), FreeRTOS task fns, `HTTPClient`/`Update` | any ESP32 Arduino sketch | partial (`emulator/core/`) |
+| L3 | Runtime bootstrap: call `setup()` once, `loop()` forever, pump SDL/LVGL events between | any program | **not started — next** |
 | L4 | The actual sketch (`.ino` + supporting files) | swappable per project | n/a — compiled as-is, zero edits |
 
 **Emulator = L0+L1+L2+L3.** L4 is a `--sketch <path>` argument, not baked in.
