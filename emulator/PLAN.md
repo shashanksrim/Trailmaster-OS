@@ -260,6 +260,110 @@ neither has a desktop equivalent worth building; the existing animated-stub
 overlay already covers what's screen-observable). User confirmed this
 boundary explicitly when asked.
 
+## Day 5: emulator hardening, then first real use for UI iteration
+
+**Part A — two more emulator-side fixes, both committed in
+`f2f677f`:**
+- `RetroEngine` (`retro_engine.cpp`) was wholesale-stubbed alongside the
+  actual NES/SMS CPU emulation in `firmware_stubs.cpp`, but it's just a
+  generic 233x233 framebuffer renderer (`heap_caps_malloc` + `amoled.
+  drawArea`, both already real) shared by Dino/Flappy
+  (`screen_game.cpp`) — not NES-specific. Compiling it for real is what
+  made Dino/Flappy stop rendering blank.
+- That surfaced a real performance bug: a single Dino/Flappy frame calls
+  `Amoled::drawArea()` ~466 times (once per scanline pair) via
+  `RetroEngine::flush()`. `g_emu_present` (added Day 4) presented on every
+  one of those calls, and — separately — its unbounded
+  `while (SDL_PollEvent())` drain loop could get stuck draining a
+  continuous mouse-motion stream (observed specifically when the emulator
+  window was focused, in this sandboxed/remote-display environment),
+  starving the actual render/game-tick from ever running. Symptom: "static,
+  then slight movement" only while focused, smooth once focus moved away.
+  Fixed by throttling presents to ~120fps AND capping the event-drain count
+  per call (both in `main.cpp`'s `emu_present()`) — not just one or the
+  other; throttling only the present still left it stuttering.
+- **Not re-verified after the fix** — the user asked to park Dino/Flappy
+  and pivot to UI work right after this landed. Re-check it next session.
+- `sdcard_shim.h` also gained `access()`/`rename()` redirects (only
+  `fopen`/`opendir`/`stat`/`unlink` were covered before) — this is what let
+  the Settings screen's boot-image toggle (Part B) actually work.
+- `build.sh`'s one build-time `.ino` transform (the `dino_ready` extern
+  strip) now matches by content via `sed`, not a hardcoded line number —
+  the line had already silently drifted once after unrelated `.ino` edits,
+  which would have produced a confusing wrong-line-transformed build.
+
+**Part B — first real use of the emulator for its intended purpose:
+iterating on firmware UI with live screenshot verification.** Committed in
+`07a7e2a`. This is a genuinely different mode of work than Days 1-4 (which
+were about making the emulator itself correct) — worth its own process note
+for next time:
+
+*Workflow that worked well:* for a UI change, mock it up first with the
+`mcp__visualize` tool (a quick HTML/SVG sketch at the real 466x466 round
+proportions) to agree on direction before touching any LVGL code, then
+implement for real in the `.ino`/`.cpp`/`.h` files and verify with
+`EMU_FORCE_SCREEN=<name>` + a screenshot. Real firmware files are fully
+fair game to edit for actual feature work — the "never edit tracked files"
+rule is specific to the emulator's own build script needing to compile the
+.ino *unmodified*, not a ban on developing the firmware itself.
+
+*Changes made:*
+- **Settings screen** (`build_settings_screen()`): grouped rows under
+  left-aligned section headers (Display/Connectivity/Modes/Boot image),
+  switched row labels from the title's Rajdhani font to Montserrat. The old
+  "Custom boot img" toggle was *silently broken in the emulator* (used
+  `access()`/`rename()`, not redirected by `sdcard_shim.h` at the time) —
+  fixed by the Part A shim fix, not a UI change. A picker-screen redesign
+  was tried first and reverted: picking *which* image is already handled by
+  the real "SET AS BOOTLOADER" long-press button in Image Frame
+  (`PhotoFrameApp.cpp`) — Settings only needed to be the on/off switch for
+  whatever's already chosen there, which is what shipped. "Boot duration"
+  now always shows (it affects the default splash too, not just a custom
+  image — the old hidden-unless-toggled-on layout obscured that).
+- **WiFi upload overlay** (`pf_show_upload_overlay`): close button enlarged
+  72px/repositioned off the bezel edge; "Enable Wi-Fi:" + toggle centered as
+  one flex-laid-out unit (was hardcoded off-center); toggle resized to
+  match Settings' switches exactly (60x30).
+- **Speedometer/gauge background** (`ui_img_1093738210`, shared by both):
+  replaced the old 200x199 stock contour-map texture (needed 800/256x zoom
+  + 70/255 black recolor to fill the screen) with a native 466x466
+  purpose-made image — no zoom/recolor needed. **Tried the same on the
+  Godzilla speedometer (a radar-grid background) and reverted** — its GIF
+  frames have an opaque black backdrop baked into the artwork itself, so
+  anything underneath is invisible no matter the z-order. Don't retry this
+  without first checking whether the GIF assets have real transparency.
+- **Color scheme**: there were *four* independent, inconsistent ad hoc
+  color systems across the boot-sweep animation (zones at 3500/6500rpm),
+  the live-update path (zones at 1000/3000/6000rpm), a generic
+  blue/green/red percent gradient (`get_dynamic_color`, gauge arcs), and
+  hardcoded tick colors (redline at 6000rpm). Consolidated into one
+  **amber `#FFB020` / hot `#FFC54D` / redline `#FF3B1D`** scheme at
+  consistent 3000/6000rpm-equivalent thresholds — this is now the
+  established palette, reuse it for any future gauge/dial work rather than
+  introducing another ad hoc set. Speed *and* rpm digit readouts both track
+  the zone color now (matching the arc); unit captions ("rpm"/"km/h") stay
+  fixed amber.
+- **Long-press settings menu** (`open_speedo_settings_menu` in
+  `godzilla_speedo_ui.h`, shared by both speedometer screens): replaced ad
+  hoc blue/green/red buttons with Settings-style dark cards; replaced a
+  "Simulate OBD ON/OFF" button whose own label doubled as an ambiguous
+  status readout with a real switch. Found two real LVGL bugs while
+  redesigning, now fixed: the flex container was left scrollable with
+  default padding (stray horizontal scrollbar), and the close button was
+  never moved to the foreground, so the container created after it (their
+  bounds overlapped near the top) silently ate clicks in that band.
+
+**Verification note specific to this UI work:** the real first-run
+onboarding WiFi overlay (2s after boot, real firmware behavior) covers
+*any* forced screen almost immediately, including ones reached via
+`EMU_FORCE_SCREEN`. There's no clean way to screenshot around it without
+either suppressing real behavior (rejected — see process notes) or a real
+simulated click on its close button (fiddly to get right via AppleScript
+window-geometry math, and the user generally preferred to check visually
+themselves rather than wait on that). Default to asking the user to verify
+when the overlay would be in the way, rather than spending tool calls
+fighting click coordinates.
+
 ## Notes / decisions
 - This lives in `emulator/` at the repo root (not nested in the sketch
   folder), to make the "reusable, not Trailmaster-specific" intent visible
@@ -268,3 +372,13 @@ boundary explicitly when asked.
   not deleted. Once `emulator/` can render the real app end-to-end, decide
   whether to retire `sim/` or keep both (sim/ is faster to iterate visuals
   with `Module.ccall`; emulator/ is the source of truth for correctness).
+- **Image asset conversion (PNG -> LVGL `lv_img_dsc_t`)**: no converter
+  tool was on hand, so a one-off Python/PIL script did it — read the PNG,
+  pack each pixel as RGB565 little-endian (2 bytes) + alpha (1 byte) to
+  match this project's `LV_IMG_CF_TRUE_COLOR_ALPHA`/`LV_COLOR_16_SWAP=0`
+  config (verified by checking `lv_conf.h` and reverse-engineering an
+  existing asset's byte count against its known w*h), then emit the same
+  `const uint8_t ..._data[]` + `const lv_img_dsc_t` structure SquareLine's
+  own generated files use. The script isn't checked in anywhere (it lived
+  in the session's scratchpad) — recreate it if another image needs
+  converting rather than searching for it.
