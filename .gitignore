@@ -11,3 +11,4 @@ waveshare_esp32s3_1.43_amoled_lvgl8/test/test_ota
 .claude/
 **/.claude/
 emulator/test/test_core
+emulator/test/test_l3
