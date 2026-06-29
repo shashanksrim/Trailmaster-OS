@@ -10,6 +10,7 @@
 #include <cstring>
 
 uint16_t g_emu_framebuffer[EMU_DISP_W * EMU_DISP_H];
+void (*g_emu_present)() = nullptr;
 Amoled amoled;
 
 Amoled::Amoled() {}
@@ -44,11 +45,13 @@ bool Amoled::drawArea(uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, uint16
             g_emu_framebuffer[fy * EMU_DISP_W + fx] = px;
         }
     }
+    if (g_emu_present) g_emu_present();
     return true;
 }
 
 bool Amoled::fillScreen(uint16_t color565) {
     for (int i = 0; i < EMU_DISP_W * EMU_DISP_H; i++) g_emu_framebuffer[i] = color565;
+    if (g_emu_present) g_emu_present();
     return true;
 }
 
@@ -62,6 +65,7 @@ bool Amoled::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color
             g_emu_framebuffer[fy * EMU_DISP_W + fx] = color565;
         }
     }
+    if (g_emu_present) g_emu_present();
     return true;
 }
 

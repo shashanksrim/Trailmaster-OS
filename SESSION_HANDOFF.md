@@ -46,20 +46,26 @@ that runs the REAL, unmodified firmware natively on a Mac (not a hand-rebuilt
 approximation) — so any screen/feature renders correctly without per-screen
 manual porting work, and so it's reusable for other sketches on this board.
 
-**Status: major milestone reached, Day 3 in progress.** The real `.ino`
-(with exactly one mechanical, build-time-only line transform — the tracked
-file is never edited) compiles, links, and runs as a native macOS app.
+**Status: Day 4 done.** The real `.ino` (with exactly one mechanical,
+build-time-only line transform — the tracked file is never edited)
+compiles, links, and runs as a native macOS app. Every screen except
+NES/SMS and OTAManager's real network OTA now runs real, compiled-as-is
+firmware code (see "Day 4" below and in PLAN.md).
 
-**Run it:**
+**Run it (double-click, no Terminal needed beyond the one-time build):**
 ```bash
 cd ~/Documents/GitHub/Trailmaster-OS-dev
-./emulator/build.sh && ./emulator/build/trailmaster_emulator
+./emulator/build.sh
+open "emulator/build/Trailmaster Emulator.app"   # or double-click it in Finder
 ```
-A real window opens, booting to the **Speedometer** by default (confirmed
-correct — see PLAN.md's "Day 3 progress" section for the false-lead
-correction). To verify a specific screen instead of relying on touch
-gestures, set `EMU_FORCE_SCREEN=gauge|inclinometer|launcher` before running
-— it jumps there right after `setup()`.
+A real window opens, booting through a real **TRAILMASTER splash** into the
+**Speedometer** by default. ~2s after boot, the real first-run-onboarding
+WiFi overlay opens automatically (since no networks are saved) — that's
+real firmware behavior, not an emulator artifact; same as a real fresh
+device. To jump straight to a specific screen instead, set
+`EMU_FORCE_SCREEN=gauge|inclinometer|launcher|settings|about|godzilla|imageframe`
+before running the raw binary (`./emulator/build/trailmaster_emulator`) —
+it jumps there right after `setup()`.
 
 To screenshot it: `pkill -f trailmaster_emulator` first if an old instance
 might still be running (stale windows have caused false readings before),
@@ -69,21 +75,22 @@ frontmost of process "trailmaster_emulator" to true'` followed by
 screen instead of the app, the screen is probably actually locked** —
 check before assuming a rendering bug.
 
-**Screenshot-verified correct so far** (Speedometer, Gauges, Inclinometer,
-Launcher/grid mode) — all via the real firmware code. **Immediate next
-step, exact and ready to act on — see PLAN.md's "Not yet checked" section
-for the precise function signatures/linkage needed:** wire up
-`EMU_FORCE_SCREEN=settings|about` (two easy `extern` declarations) and
-figure out reaching the OTA overlay (it's `static`/internal-linkage inside
-`ota_overlay_ui.h`, so it has to be reached via `build_about_screen()` +
-either accept that screenshot as sufficient, or simulate a real touch on
-its button).
+**Screenshot-verified correct** (all via real firmware code, not hand-rebuilt
+approximations): Speedometer, Gauges, Inclinometer, Launcher/grid, Settings,
+About, Godzilla speedometer (real GIF/PSRAM playback), Image Frame carousel
+(real photo decode — `sd_files/img_trailmaster.bin` renders), WiFi-upload
+overlay (QR code, toggle switch, real onboarding trigger), boot splash.
 
-**What's deliberately stubbed this pass** (see `emulator/board/firmware_stubs.cpp`):
-PhotoFrameApp (WiFi portal/photos), OTAManager (real network OTA), GIF/PSRAM
-parts of the Godzilla speedometer, NES/SMS game engines. Everything else —
-including Dino/Flappy game logic (`screen_game.cpp`) — is the real code.
-Image Frame / Games screens are expected to render blank — not a bug.
+**What's still deliberately stubbed** (see `emulator/board/firmware_stubs.cpp`):
+NES/SMS game engines, and OTAManager's real network OTA (real HTTPS calls to
+GitHub + ESP32 flash-partition writes — no desktop equivalent worth faking;
+user confirmed this boundary explicitly). Everything else — including
+Dino/Flappy (`screen_game.cpp`), the Godzilla speedometer, and PhotoFrameApp
+(WiFi portal + photo carousel) — is real, compiled-as-is firmware code. See
+PLAN.md's "Day 4" section for the two real emulator-side bugs found and
+fixed along the way (`sdcard_shim.h` only redirecting `fopen` not
+`opendir`/`stat`/`unlink`; setup()-time rendering never reaching the SDL
+window).
 
 ## How to verify nothing is broken before continuing
 ```bash
@@ -103,3 +110,16 @@ cd ~/Documents/GitHub/Trailmaster-OS-dev
 - Don't use `git add -A` carelessly in the dev workspace without checking —
   it's accidentally tracked `.claude/` (local tooling) twice already; both
   `.gitignore`s now have `.claude/` and `**/.claude/` entries.
+- **Don't special-case emulator behavior to make verification/screenshots
+  easier.** An attempt to suppress the first-run-onboarding overlay
+  specifically when `EMU_FORCE_SCREEN` was set (so debug screenshots
+  wouldn't get covered by it) was explicitly rejected: "we don't want the
+  functionality to be suppressed... this is an emulator, we should not
+  custom do stuff." The user's stated intent is a generic "drag and drop
+  any .ino" emulator — fix real gaps in the generic L1/L2 shim layer (like
+  the two Day-4 bugs found in `sdcard_shim.h` and the present/flush
+  pipeline), don't add debug-only conditionals that change firmware-visible
+  behavior.
+- When verifying visually, confirm with the user before repeating
+  screenshot attempts — they may already be watching the window themselves
+  and can confirm faster than another screenshot round-trip.

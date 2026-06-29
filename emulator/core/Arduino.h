@@ -9,8 +9,10 @@
 #include <chrono>
 #include <thread>
 #include <string>
+#include <unistd.h> // unlink() etc. — declared via newlib globally on real ESP32-Arduino
 
 using std::uint8_t; using std::uint16_t; using std::uint32_t; using std::int32_t;
+using byte = uint8_t;
 
 // ── millis()/delay() ─────────────────────────────────────────────────────────
 inline uint32_t millis() {
@@ -37,8 +39,21 @@ struct SerialClass {
 };
 extern SerialClass Serial;
 
-// ── String (very small subset — most sketches use it like a std::string) ─────
-using String = std::string;
+// ── String (small subset of Arduino's String API on top of std::string —
+// most sketches use it like a std::string, but a few call Arduino-specific
+// methods std::string doesn't have) ───────────────────────────────────────
+class String : public std::string {
+public:
+    String() : std::string() {}
+    String(const std::string& s) : std::string(s) {}
+    String(const char* s) : std::string(s ? s : "") {}
+    String(char c) : std::string(1, c) {}
+    bool endsWith(const char* suffix) const {
+        size_t n = std::strlen(suffix);
+        return size() >= n && compare(size() - n, n, suffix) == 0;
+    }
+    bool isEmpty() const { return empty(); }
+};
 
 // ── FreeRTOS task primitives (Arduino-ESP32 makes these globally available
 // after including Arduino.h, without a separate freertos/*.h include) ───────

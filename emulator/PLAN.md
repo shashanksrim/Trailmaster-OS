@@ -164,14 +164,101 @@ the button to exercise), so reaching the overlay would only prove the
 button is clickable, not exercise new logic. Page-1 About screenshot above
 is the accepted verification for this screen.
 
-Image Frame / Games are deliberately stubbed (PhotoFrameApp.cpp /
-RetroEngine/NesEngine not compiled this pass) — expected to render blank,
-not a bug.
+NES/SMS games (RetroEngine/NesEngine) remain deliberately stubbed — expected
+to render blank, not a bug. Image Frame is no longer stubbed — see Day 4.
 
 **Process note:** if screenshots come back showing the macOS desktop/lock
 screen instead of the emulator window, check whether the screen is
 actually locked (`screencapture` silently captures the lock screen) before
 assuming a rendering bug.
+
+## Day 4: Godzilla speedometer + PhotoFrameApp (WiFi overlay, image carousel)
+made real — everything except NES/SMS and OTAManager's real network OTA
+
+User's framing for this pass: this is meant to be a generic board emulator
+("drag and drop any .ino and it should work without manual work from the
+user side") — so the bar isn't "make Trailmaster's two named screens look
+right," it's "fix the generic L1/L2 shim gaps that were silently swallowing
+real firmware behavior." Two real bugs in our OWN shim code were found and
+fixed this way, not worked around in the firmware.
+
+**ui_godzillaspeedometer.cpp and PhotoFrameApp.cpp now compile for real**
+(previously wholesale-stubbed in `firmware_stubs.cpp`). Required:
+- Vendoring the real AnimatedGIF v2.2.0 library (Apache-2.0, portable C/C++)
+  into `emulator/board/vendor/AnimatedGIF/` from the installed Arduino
+  library — replacing `emulator/core/AnimatedGIF.h`'s fake (deleted). The
+  library's own header already self-detects `__MACH__`/host builds and
+  skips pulling in `<Arduino.h>` — by design, since plain desktop use of the
+  library shouldn't assume Arduino is present. That meant files which only
+  got `Serial`/etc. *transitively* via `<AnimatedGIF.h>` on real ESP32
+  (because there `__MACH__` isn't defined, so it falls through to
+  `#include <Arduino.h>`) lost that on our host build. Fixed generically by
+  force-including `core/Arduino.h` into every C++ TU in `build.sh` (`-include`),
+  matching what arduino-cli effectively does sketch-wide — not a per-file fix.
+- New generic L2 shims: real `WebServer`/`DNSServer` API surface (`.on()`,
+  `.send()`, `HTTPUpload`, etc. — registered but inert, since there's no
+  real listening socket; matches the existing "WiFi never truly connects"
+  boundary), `esp_cache.h` (no-op `esp_cache_msync`), `byte` typedef,
+  `<unistd.h>` for `unlink()`, and an Arduino `String` subclass (was a bare
+  `std::string` alias) adding `.endsWith()`/`.isEmpty()`.
+- `Jimnylogo.c`/`wifi_qr.c` (SquareLine image assets used by the boot splash
+  and WiFi-upload-overlay QR) added to `build.sh`'s C compile list — not
+  matched by the `ui*.c` glob.
+
+**Real bug #1 found and fixed: `sdcard_shim.h` only redirected `fopen()`.**
+`opendir()`/`stat()`/`unlink()` calls against `/sd_card/...` (used by
+`scan_images()` to list photos, and by the splash/Godzilla GIF-existence
+checks) were hitting the *real* macOS path `/sd_card` (which doesn't exist)
+and silently no-op'ing — e.g. the photo carousel always looked empty no
+matter what was on the simulated SD card, even though `img_trailmaster.bin`
+(434312 bytes = exactly 466×466×2 raw RGB565, picked up by `scan_images()`'s
+`.bin` filter) was sitting right there in `sd_files/`. Fixed by extending
+the same path-rewrite macro trick already used for `fopen` to `opendir`,
+`stat`, and `unlink` (same file, same pattern: real-call wrapper function
+defined *before* its `#define`, so the wrapper's own internal call to the
+real libc function isn't itself macro-expanded). This was a gap in our own
+emulator code, not a firmware workaround — confirmed fixed: the carousel
+now actually shows the trailmaster image.
+
+**Real bug #2 found and fixed: setup()-time rendering was invisible.**
+The boot splash (`show_boot_splash()`, called from `setup()`) plays a GIF or
+static logo via a *blocking* `while` loop that calls `lv_timer_handler()`
+directly — a normal, valid pattern, since on real hardware the LVGL flush
+callback IS the physical display, so this shows up fine. But the emulator's
+old `main.cpp` only pushed `g_emu_framebuffer` to the actual SDL window
+once per `while(running)` iteration, which never runs during `setup()` — so
+anything rendered before `setup()` returns (the entire splash sequence) was
+invisible; the window would show nothing until boot finished. Fixed at the
+L1/L3 boundary, not in firmware: added `g_emu_present` (a plain function
+pointer in `emu_state.h`, so L1 stays free of direct SDL calls per that
+file's existing design) that `amoled_sim.cpp`'s `drawArea`/`fillScreen`/
+`fillRect` call after every write. `main.cpp` registers it to a real
+present-and-pump-events function *before* calling `setup()`. Confirmed
+fixed: TRAILMASTER splash now visibly renders during boot.
+
+**WiFi-upload overlay (the "wifi overlay screen") confirmed real and working**
+via the .ino's existing first-run-onboarding path (no emulator-side
+special-casing — an earlier attempt to suppress onboarding specifically
+under `EMU_FORCE_SCREEN` was reverted at the user's request: "we don't want
+the functionality to be suppressed... this is an emulator, we should not
+custom do stuff"). QR code, Wi-Fi toggle switch (auto-ON from onboarding),
+SSID/password hint text, and close button all render and respond to clicks.
+
+**`EMU_FORCE_SCREEN` gained `godzilla` and `imageframe`** (alongside the
+existing screens) by adding two more `extern "C"` declarations + branches
+in `emu_debug_force_screen()` — same pattern as before.
+
+**Double-clickable launch.** `build.sh` now also assembles a minimal
+`emulator/build/Trailmaster Emulator.app` bundle (Info.plist + the same
+binary) so the emulator can be opened from Finder/`open` without touching
+Terminal for normal use — Terminal is still needed once, to run
+`./emulator/build.sh`.
+
+**Still stubbed, deliberately:** NES/SMS engines, and OTAManager's real
+network OTA (real HTTPS calls to GitHub + ESP32 flash-partition writes —
+neither has a desktop equivalent worth building; the existing animated-stub
+overlay already covers what's screen-observable). User confirmed this
+boundary explicitly when asked.
 
 ## Notes / decisions
 - This lives in `emulator/` at the repo root (not nested in the sketch

@@ -16,3 +16,16 @@ extern EmuInput g_emu_input;
 // L1's Amoled shim writes finished frames here; L3 reads it once per frame
 // and pushes it to the SDL texture. RGB565, native (un-swapped) byte order.
 extern uint16_t g_emu_framebuffer[EMU_DISP_W * EMU_DISP_H];
+
+// L3 sets this once at startup, before calling setup(), to a function that
+// pumps SDL events and presents g_emu_framebuffer to the real window. L1's
+// Amoled shim calls it after every write so the window updates in real time
+// — not just once per loop() iteration. This matters because some real
+// firmware code (e.g. the boot splash) calls lv_timer_handler() in a
+// blocking loop INSIDE setup(), before L3's own event/present loop ever
+// runs; on real hardware that's fine since the flush callback IS the
+// display, but without this hook the emulator would show nothing until
+// setup() returns and the splash (or any other setup()-time animation)
+// would be invisible. Kept as a plain function pointer (not a direct SDL
+// call from L1) to keep L1 free of SDL dependencies, per the file header.
+extern void (*g_emu_present)();
