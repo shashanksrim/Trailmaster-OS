@@ -134,10 +134,28 @@ hand-rebuilt approximations):**
 - **Launcher** (grid mode) — all 7 app icons (SPEEDO/GAUGES/INCLINE/IMAGE/
   GAMES/SYSTEM/ABOUT), steel borders, no text bleed-through
 
-**Not yet checked:** OTA overlay, About, Settings (should work — already
-incidentally seen once — but not deliberately re-verified after the
-EMU_FORCE_SCREEN addition), Image Frame (stubbed, expected blank),
-Games/NES (stubbed, expected blank).
+**Not yet checked — exact next step for a fresh session:** OTA overlay,
+About, Settings. `EMU_FORCE_SCREEN` (in `emulator/runtime/main.cpp`)
+currently only handles `gauge`/`inclinometer`/`launcher` — these three are
+NOT wired up yet. Precise findings so this doesn't need re-deriving:
+- `build_settings_screen()` and `build_about_screen()` are plain functions
+  defined directly in the `.ino` with **default C++ linkage** (not
+  `extern "C"`, not `static`) — straightforward to add as two more
+  `else if` branches in `emu_debug_force_screen()`, declared as plain
+  `extern void build_settings_screen(); extern void build_about_screen();`
+  (no `extern "C"` wrapper needed for these two, unlike the SquareLine
+  screen functions).
+- `show_ota_update_overlay()` is `static` (internal linkage) inside
+  `ota_overlay_ui.h` — **cannot** be called directly from `main.cpp` via an
+  extern declaration. To reach it: call `build_about_screen()` first (the
+  About screen has the "Check for Update" button on it), then either (a)
+  screenshot the About screen itself as "good enough" verification, or
+  (b) simulate a touch/click on the button's screen coordinates via
+  `g_emu_input` to actually open the overlay for a deeper check.
+
+Image Frame / Games are deliberately stubbed (PhotoFrameApp.cpp /
+RetroEngine/NesEngine not compiled this pass) — expected to render blank,
+not a bug.
 
 **Process note:** if screenshots come back showing the macOS desktop/lock
 screen instead of the emulator window, check whether the screen is

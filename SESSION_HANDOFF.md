@@ -46,35 +46,44 @@ that runs the REAL, unmodified firmware natively on a Mac (not a hand-rebuilt
 approximation) — so any screen/feature renders correctly without per-screen
 manual porting work, and so it's reusable for other sketches on this board.
 
-**Status: major milestone reached.** The real `.ino` (with exactly one
-mechanical, build-time-only line transform — the tracked file is never
-edited) compiles, links, and runs as a native macOS app, screenshot-verified
-rendering the actual `build_settings_screen()` pixel-correct.
+**Status: major milestone reached, Day 3 in progress.** The real `.ino`
+(with exactly one mechanical, build-time-only line transform — the tracked
+file is never edited) compiles, links, and runs as a native macOS app.
 
-**Run it right now:**
+**Run it:**
 ```bash
 cd ~/Documents/GitHub/Trailmaster-OS-dev
 ./emulator/build.sh && ./emulator/build/trailmaster_emulator
 ```
-A real window should open. Bring it forward and screenshot if you need to
-verify visually (`osascript ... frontmost ...` then `screencapture -x`).
+A real window opens, booting to the **Speedometer** by default (confirmed
+correct — see PLAN.md's "Day 3 progress" section for the false-lead
+correction). To verify a specific screen instead of relying on touch
+gestures, set `EMU_FORCE_SCREEN=gauge|inclinometer|launcher` before running
+— it jumps there right after `setup()`.
 
-**Resolved (was a false lead):** earlier it looked like it booted to the
-Settings screen instead of the speedometer — turned out to be a stale
-leftover window from a previous test run, not real behavior. A clean run
-(`pkill -f trailmaster_emulator` first, then run + screenshot) correctly
-shows the Speedometer at boot. No bug. Always kill any old process before
-screenshotting to avoid this confusion.
+To screenshot it: `pkill -f trailmaster_emulator` first if an old instance
+might still be running (stale windows have caused false readings before),
+run fresh, then `osascript -e 'tell application "System Events" to set
+frontmost of process "trailmaster_emulator" to true'` followed by
+`screencapture -x <path>`. **If the screenshot shows the macOS desktop/lock
+screen instead of the app, the screen is probably actually locked** —
+check before assuming a rendering bug.
+
+**Screenshot-verified correct so far** (Speedometer, Gauges, Inclinometer,
+Launcher/grid mode) — all via the real firmware code. **Immediate next
+step, exact and ready to act on — see PLAN.md's "Not yet checked" section
+for the precise function signatures/linkage needed:** wire up
+`EMU_FORCE_SCREEN=settings|about` (two easy `extern` declarations) and
+figure out reaching the OTA overlay (it's `static`/internal-linkage inside
+`ota_overlay_ui.h`, so it has to be reached via `build_about_screen()` +
+either accept that screenshot as sufficient, or simulate a real touch on
+its button).
 
 **What's deliberately stubbed this pass** (see `emulator/board/firmware_stubs.cpp`):
 PhotoFrameApp (WiFi portal/photos), OTAManager (real network OTA), GIF/PSRAM
 parts of the Godzilla speedometer, NES/SMS game engines. Everything else —
 including Dino/Flappy game logic (`screen_game.cpp`) — is the real code.
-
-**Day 3 candidates** (not started): root-cause the boot-screen issue; verify
-other screens render (speedometer, gauges, inclinometer, launcher, OTA
-overlay) via screenshots; consider trying the real AnimatedGIF library
-(it's portable C, might "just work" now that SD/heap_caps are faked).
+Image Frame / Games screens are expected to render blank — not a bug.
 
 ## How to verify nothing is broken before continuing
 ```bash
