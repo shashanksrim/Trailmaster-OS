@@ -27,8 +27,10 @@ INC=(-I "$DIR/core" -I "$DIR/board" -I "$DIR/board/fake_esp_idf" -I "$GIFVENDOR"
 # Serial etc. here.
 CXXINC=("${INC[@]}" -include "$DIR/core/Arduino.h")
 
-# Generate the build-time sketch copy (see header comment above).
-sed '1790s/.*extern bool dino_ready;.*/                \/\/ (emulator build: redundant extern stripped, see emulator\/PLAN.md)/' \
+# Generate the build-time sketch copy (see header comment above). Matched by
+# content, not a hardcoded line number — the line shifts every time the .ino
+# is edited, and a stale line number would silently transform the wrong line.
+sed 's/.*extern bool dino_ready;.*/                \/\/ (emulator build: redundant extern stripped, see emulator\/PLAN.md)/' \
   "$SK/$SKNAME.ino" > "$OUT/sketch_main.cpp"
 
 LVGL_SRC=$(find "$LVGL/src" -name '*.c')
@@ -63,7 +65,7 @@ g++ -std=c++17 -O1 \
 # Godzilla speedometer GIF/PSRAM rendering, PhotoFrameApp WiFi portal + photo
 # carousel). NES/SMS and OTAManager's real network OTA remain stubbed in
 # firmware_stubs.cpp — see its header comment for why.
-for f in screen_game ui_godzillaspeedometer PhotoFrameApp; do
+for f in screen_game retro_engine ui_godzillaspeedometer PhotoFrameApp; do
   g++ -std=c++17 -O1 \
     "${CXXINC[@]}" \
     -DLV_CONF_INCLUDE_SIMPLE -DEMU_SDCARD_ROOT="\"$SDCARD_ROOT\"" \

@@ -4,8 +4,9 @@
 // calls "just work" without any edits. Every other path falls through to the
 // real libc call unchanged. Covers every POSIX file call the real, compiled
 // firmware files actually use against /sd_card (fopen, opendir/readdir/
-// closedir, stat, unlink) — readdir/closedir need no redirect since they
-// operate on the DIR* already opened against the rewritten real path.
+// closedir, stat, unlink, access, rename) — readdir/closedir need no
+// redirect since they operate on the DIR* already opened against the
+// rewritten real path.
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -40,7 +41,18 @@ inline int emu_unlink(const char* path) {
     char real[512]; emu_sdcard_rewrite(path, real, sizeof(real));
     return unlink(real);
 }
+inline int emu_access(const char* path, int mode) {
+    char real[512]; emu_sdcard_rewrite(path, real, sizeof(real));
+    return access(real, mode);
+}
+inline int emu_rename(const char* oldpath, const char* newpath) {
+    char real_old[512]; emu_sdcard_rewrite(oldpath, real_old, sizeof(real_old));
+    char real_new[512]; emu_sdcard_rewrite(newpath, real_new, sizeof(real_new));
+    return rename(real_old, real_new);
+}
 #define fopen(p, m) emu_fopen(p, m)
 #define opendir(p) emu_opendir(p)
 #define stat(p, s) emu_stat(p, s)
 #define unlink(p) emu_unlink(p)
+#define access(p, m) emu_access(p, m)
+#define rename(o, n) emu_rename(o, n)

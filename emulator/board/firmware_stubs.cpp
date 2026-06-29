@@ -61,18 +61,13 @@ const OTAStatus* ota_get_status() {
 }
 const char* ota_current_version() { return "emulator"; }
 
-// ── Game engines (NES/SMS emulation) — out of scope for this pass ────────────
-#include "retro_engine.h"
+// ── NES/SMS emulation — out of scope for this pass ────────────────────────
+// RetroEngine (retro_engine.cpp) is NOT stubbed here — it's a generic raw
+// 233x233 framebuffer renderer (heap_caps_malloc + amoled.drawArea, both
+// already real in the emulator) shared by Dino/Flappy (screen_game.cpp),
+// not NES-specific; it's compiled for real in build.sh. Only NesEngine
+// (the actual 6502 CPU emulation, ROM loading, etc.) stays stubbed.
 #include "NesEngine.h"
-uint16_t* RetroEngine::vfb = nullptr;
-uint16_t* RetroEngine::line_scratch = nullptr;
-bool RetroEngine::begin() { return true; }
-void RetroEngine::clear(uint16_t) {}
-void RetroEngine::drawPixel(int, int, uint16_t) {}
-void RetroEngine::drawSprite(int, int, int, int, const uint8_t*, uint16_t, bool) {}
-void RetroEngine::drawRect(int, int, int, int, uint16_t) {}
-void RetroEngine::flush() {}
-
 bool NesEngine::is_running = false;
 bool NesEngine::loadROM(const char*) { return false; }
 void NesEngine::update() {}
