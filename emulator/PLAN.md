@@ -12,11 +12,62 @@ swapped out.
 |---|---|---|---|
 | L0 | SDL display canvas + mouse-as-touch | any program | **done & folded into L3** (`emulator/runtime/main.cpp`) |
 | L1 | Board BSP shim: `Amoled`, `FT3168` (`getTouch`), `qmi8658c` — same public API as the real driver files | any sketch on this board | **done & verified** (`emulator/board/*_sim.cpp`) — compile clean standalone against the real, unmodified headers |
-| L2 | Arduino-ESP32 core shim: `Serial`, `millis`/`delay`, `Preferences` done. **Still needed**: `WiFi`, `SD`/`FFat` (path-redirect `/sd_card` → local `sd_files/`), FreeRTOS task fns, `HTTPClient`/`Update` | any ESP32 Arduino sketch | partial (`emulator/core/`) |
-| L3 | Runtime bootstrap: call `setup()` once, `loop()` forever, pump SDL/LVGL events between | any program | **done & verified end-to-end** (`emulator/runtime/main.cpp`) — native SDL2 (brew) installed; trivial test sketch compiled+ran as a real macOS window, screenshot-confirmed correct rendering through the full real-Amoled-class pipeline |
-| L4 | The actual sketch (`.ino` + supporting files) | swappable per project | n/a — compiled as-is, zero edits |
+| L2 | Arduino-ESP32 core shim: `Serial`, `millis`/`delay`, `Preferences`, `WiFi`/`esp_wifi` (fake, never connects), `WebServer`/`DNSServer` (type-only), `FFat`, `esp_heap_caps` (malloc-backed), `AnimatedGIF` (stub), `sdcard_shim` (`/sd_card` path redirect), FreeRTOS task fns | any ESP32 Arduino sketch | **done for this pass** (`emulator/core/`) |
+| L3 | Runtime bootstrap: call `setup()` once, `loop()` forever, pump SDL/LVGL events between | any program | **done & verified end-to-end** (`emulator/runtime/main.cpp`) |
+| L4 | The actual sketch (`.ino` + supporting files) | swappable per project | **MILESTONE: real .ino compiles, links, runs, and renders correctly** — see "Day 2 result" below |
 
 **Emulator = L0+L1+L2+L3.** L4 is a `--sketch <path>` argument, not baked in.
+
+## Day 2 result (milestone)
+
+The real `waveshare_esp32s3_1.43_amoled_lvgl8.ino` — with exactly **one**
+mechanical, build-time-only transform (never edits the tracked file; see
+`emulator/build.sh`'s header comment and "Known quirks" below) — compiles,
+links, and runs as a native macOS app. Screenshot-verified: the real
+`build_settings_screen()` renders pixel-correct (brightness buttons, Wifi
+settings row, Jimny mode / Grid Launcher toggles, dark theme).
+
+**Run it:** `./emulator/build.sh && ./emulator/build/trailmaster_emulator`
+
+**What this pass deliberately does NOT compile** (stubbed in
+`emulator/board/firmware_stubs.cpp`, matching `sim/`'s existing precedent):
+- `PhotoFrameApp.cpp` — WiFi portal + photo carousel
+- `OTAManager.cpp` — real network OTA (same animated-state stub as `sim/`)
+- The GIF/PSRAM parts of `ui_godzillaspeedometer.cpp` (screen init/destroy/
+  event handler) — the pure-visual parts (gauge, ticks, settings menu) ARE
+  real, shared via `godzilla_speedo_ui.h`
+- NES/SMS game engines (`RetroEngine`/`NesEngine`) — `screen_game.cpp`
+  (Dino/Flappy) IS real and compiled
+
+**Known quirks found along the way:**
+- `g++` defaults ALL inputs to C++ regardless of `.c` extension unless told
+  `-x c` explicitly (same class of bug as `emcc` vs `em++` from the `sim/`
+  WASM build) — SquareLine's `.c` files need this.
+- `esp_heap_caps.h` must be C/C++-agnostic — LVGL's own `.c` sources pull it
+  in transitively.
+- One redundant local `extern bool dino_ready;` (line 1790 of the .ino)
+  has a linkage conflict with `screen_game.h`'s file-scope declaration that
+  **Clang treats as a hard error with no controlling flag**, but the real
+  ESP32 GCC toolchain accepts leniently. Real GCC (installed via brew) was
+  tried as a "more faithful" fix but hit an unrelated, deep Homebrew-GCC/
+  macOS-SDK incompatibility (fixincludes assumes an older SDK header
+  layout) — not worth fixing further. Settled on a build-time-only sed
+  transform (one line, in `emulator/build.sh`, applied to a generated copy
+  in `emulator/build/`) — the tracked `.ino` is never touched.
+- `ui_gridlauncher.c` is genuinely dead/vestigial SquareLine code —
+  `ui_uigridlauncher` is declared but never referenced anywhere in the
+  real `.ino`'s actual flow (the real grid launcher is the hand-coded
+  `build_grid_launcher()`, built on `ui_uilauncher`). The real toolchain's
+  `--gc-sections` silently strips it; native linking needs it excluded
+  explicitly from the build file list.
+- `open_speedo_settings_menu` (inline, in the shared `godzilla_speedo_ui.h`)
+  needed a non-static, externally-linked global holding its address to
+  prevent dead-code elimination — its only caller in this reduced build is
+  a `.c` file, so there was no "real" call site forcing emission.
+
+**Open follow-up:** boots to the Settings screen, not the speedometer —
+worth investigating, but not evidence the pipeline is broken (the render
+itself is confirmed pixel-correct).
 
 ## Day-by-day
 
