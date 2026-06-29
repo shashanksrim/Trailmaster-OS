@@ -335,16 +335,20 @@ void pf_show_upload_overlay(void) {
     lv_obj_clear_flag(pf_upload_overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_center(pf_upload_overlay);
 
+    // Sized/positioned to match the photo long-press menu's close button
+    // (PhotoFrameApp.cpp's photoframe_event_handler, size 60 at y=30) but a
+    // bit bigger here since this is the primary/only control at the top of
+    // an otherwise-empty area, not a secondary action in a button cluster.
     lv_obj_t * btn_close = lv_btn_create(pf_upload_overlay);
-    lv_obj_set_size(btn_close, 60, 60);
+    lv_obj_set_size(btn_close, 72, 72);
     lv_obj_set_style_radius(btn_close, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(btn_close, lv_color_hex(0x444444), 0);
-    lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 15);
-    lv_obj_set_ext_click_area(btn_close, 36);   // small button, large invisible tap target
+    lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_set_ext_click_area(btn_close, 36);   // large invisible tap target beyond the visible circle
     lv_obj_move_foreground(btn_close);
     lv_obj_t * lbl_x = lv_label_create(btn_close);
     lv_label_set_text(lbl_x, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lbl_x, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_x, &lv_font_montserrat_24, 0);
     lv_obj_center(lbl_x);
     lv_obj_add_event_cb(btn_close, [](lv_event_t * ev) {
         lv_event_code_t c = lv_event_get_code(ev);
@@ -363,10 +367,30 @@ void pf_show_upload_overlay(void) {
     lv_img_set_zoom(qr_img, 215);
     lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, -10);
 
-    // Wi-Fi Toggle Switch
-    lv_obj_t * wifi_sw = lv_switch_create(pf_upload_overlay);
-    lv_obj_set_size(wifi_sw, 72, 36);
-    lv_obj_align(wifi_sw, LV_ALIGN_CENTER, 50, 120);
+    // Wi-Fi Toggle Switch — wrapped in a flex row so the label+switch pair is
+    // centered as a unit (previously the switch was hardcoded at center+50,
+    // with the label hung off its left edge, so the whole row sat off-center
+    // by however wide the label happened to render). Switch size matches the
+    // Settings screen's toggles (60x30) for consistency.
+    lv_obj_t * wifi_row = lv_obj_create(pf_upload_overlay);
+    lv_obj_set_size(wifi_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(wifi_row, 0, 0);
+    lv_obj_set_style_border_width(wifi_row, 0, 0);
+    lv_obj_set_style_pad_all(wifi_row, 0, 0);
+    lv_obj_clear_flag(wifi_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(wifi_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wifi_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(wifi_row, 10, 0);
+    lv_obj_align(wifi_row, LV_ALIGN_CENTER, 0, 120);
+
+    lv_obj_t * wifi_lbl = lv_label_create(wifi_row);
+    lv_label_set_text(wifi_lbl, "Enable Wi-Fi:");
+    lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(wifi_lbl, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t * wifi_sw = lv_switch_create(wifi_row);
+    lv_obj_set_size(wifi_sw, 60, 30);
+    lv_obj_set_style_bg_color(wifi_sw, lv_color_hex(0xFF6A00), LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(wifi_sw, [](lv_event_t * ev) {
         lv_obj_t * sw = lv_event_get_target(ev);
         if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
@@ -387,12 +411,6 @@ void pf_show_upload_overlay(void) {
         }, 400, NULL);
         (void)t;
     }
-
-    lv_obj_t * wifi_lbl = lv_label_create(pf_upload_overlay);
-    lv_label_set_text(wifi_lbl, "Enable Wi-Fi:");
-    lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(wifi_lbl, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align_to(wifi_lbl, wifi_sw, LV_ALIGN_OUT_LEFT_MID, -10, 0);
 
     lv_obj_t * hint = lv_label_create(pf_upload_overlay);
     lv_label_set_text(hint, "Wi-Fi: Jimny_Dash_Sync | Pass: password123");

@@ -36,26 +36,17 @@ extern "C" {
 // Forward declaration for dynamic color mapping
 extern lv_color_t get_dynamic_color(float percent);
 
-// Custom color logic for simplified RPM zones (Yellow -> Blue -> Red)
+// RPM zones: amber (<=3000), hot (<=6000), redline (>6000) — same thresholds
+// as the redline sector/tick boundary below and ui_uispeedometer.c's boot
+// animation, so the dial reads consistently whether it's animating on
+// screen load or tracking real OBD data.
 static inline lv_color_t get_rpm_gauge_color(int rpm) {
-    if (rpm <= 1000) {
-        return lv_color_hex(0xFFFFFF); // White instead of grey for 0-1000
-    } else if (rpm <= 3000) {
-        // Yellow to Orange transition (1000 to 3000)
-        float pct = (rpm - 1000) / 2000.0f;
-        uint8_t r = 0xFF;
-        uint8_t g = (uint8_t)(0xFF - pct * (0xFF - 0xA5));
-        uint8_t b = 0x00; // Force blue to 0 so it starts as pure Yellow (FF,FF,00)
-        return lv_color_make(r, g, b);
+    if (rpm <= 3000) {
+        return lv_color_hex(0xFFB020); // amber
     } else if (rpm <= 6000) {
-        // Orange to Red transition (3000 to 6000)
-        float pct = (rpm - 3000) / 3000.0f;
-        uint8_t r = 0xFF;
-        uint8_t g = (uint8_t)(0xA5 - pct * 0xA5);
-        uint8_t b = 0x00;
-        return lv_color_make(r, g, b);
+        return lv_color_hex(0xFFC54D); // hot
     } else {
-        return lv_color_hex(0xAA0000); // Deep red
+        return lv_color_hex(0xFF3B1D); // redline
     }
 }
 
@@ -85,7 +76,7 @@ static inline void build_speedo_rpm_gauge(lv_obj_t * parent) {
     lv_obj_align(redline, LV_ALIGN_CENTER, 0, 0);
     lv_arc_set_bg_angles(redline, 338, 45); // 6000 to 8000 RPM radial sector
     lv_arc_set_value(redline, 0); // Static track mode only
-    lv_obj_set_style_arc_color(redline, lv_color_hex(0xFF0000), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(redline, lv_color_hex(0xFF3B1D), LV_PART_MAIN);
     lv_obj_set_style_arc_width(redline, 3, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(redline, 200, LV_PART_MAIN); // Slight translucency
     lv_obj_remove_style(redline, NULL, LV_PART_KNOB);
@@ -116,7 +107,7 @@ static inline void build_speedo_rpm_gauge(lv_obj_t * parent) {
         scale_ticks[i][1] = {(lv_coord_t)(CX + (int)(R_OUTER * c)), (lv_coord_t)(CY + (int)(R_OUTER * s))};
         
         // Render scale line
-        lv_color_t line_color = (i >= 30) ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF);
+        lv_color_t line_color = (i >= 30) ? lv_color_hex(0xFF3B1D) : lv_color_hex(0xFFB020);
         lv_obj_t * ln = lv_line_create(parent);
         lv_line_set_points(ln, scale_ticks[i], 2);
         lv_obj_set_style_line_width(ln, w, 0);
@@ -126,11 +117,13 @@ static inline void build_speedo_rpm_gauge(lv_obj_t * parent) {
         // Handle Numeric Clusters only on 1000-RPM boundaries
         if (is_major) {
             int label_val = i / 5;
-            lv_color_t label_color = (label_val >= 6) ? lv_color_hex(0xFF0000) : lv_color_hex(0xFFFFFF);
+            // Redline labels (6/7/8) match the redline tick color; the rest
+            // match the amber ticks.
+            lv_color_t label_color = (label_val >= 6) ? lv_color_hex(0xFF3B1D) : lv_color_hex(0xFFB020);
             lv_obj_t * lbl = lv_label_create(parent);
             lv_label_set_text_fmt(lbl, "%d", label_val);
             lv_obj_set_style_text_font(lbl, &ui_font_rajdhani1, 0); // Use crisp industrial font
-            lv_obj_set_style_text_color(lbl, label_color, 0); 
+            lv_obj_set_style_text_color(lbl, label_color, 0);
             
             // Dynamically compute true centered offset to anchor visually
             int lx = CX + (int)(R_INNER * c) - 10;
@@ -203,16 +196,19 @@ inline void update_screen_ui() {
         if (car_rpm != last_rpm) {
             last_rpm = car_rpm;
             lv_color_t rpm_color = get_rpm_gauge_color(car_rpm);
-            if (ui_rpmlabel && !is_standard_animating) lv_label_set_text_fmt(ui_rpmlabel, "%d", car_rpm);
+            if (ui_rpmlabel && !is_standard_animating) {
+                lv_label_set_text_fmt(ui_rpmlabel, "%d", car_rpm);
+                lv_obj_set_style_text_color(ui_rpmlabel, rpm_color, LV_PART_MAIN);
+            }
             if (ui_rpmarc && !is_standard_animating) {
                 lv_arc_set_value(ui_rpmarc, car_rpm);
                 lv_obj_set_style_arc_color(ui_rpmarc, rpm_color, LV_PART_INDICATOR);
             }
+            // Speed and rpm values both follow the same amber/hot/redline
+            // zone as the arc. Only the "rpm"/"km/h" unit captions stay
+            // fixed amber.
             if (ui_speedlabel && !is_standard_animating) {
                 lv_obj_set_style_text_color(ui_speedlabel, rpm_color, LV_PART_MAIN);
-            }
-            if (ui_visspeed && !is_standard_animating) {
-                lv_obj_set_style_text_color(ui_visspeed, rpm_color, LV_PART_MAIN);
             }
         }
 

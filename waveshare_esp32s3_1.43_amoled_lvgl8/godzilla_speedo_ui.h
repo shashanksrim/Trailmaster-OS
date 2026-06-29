@@ -192,106 +192,121 @@ inline void open_speedo_settings_menu(lv_obj_t * parent_screen, bool is_godzilla
     lv_obj_set_style_radius(btn_close, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(btn_close, lv_color_hex(0x444444), 0);
     lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 25);
+    lv_obj_set_ext_click_area(btn_close, 30); // larger invisible tap target beyond the visible circle
     lv_obj_t * lbl_x = lv_label_create(btn_close);
     lv_label_set_text(lbl_x, LV_SYMBOL_CLOSE);
     lv_obj_set_style_text_font(lbl_x, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_x);
 
     lv_obj_add_event_cb(btn_close, [](lv_event_t * ev) {
+        lv_event_code_t c = lv_event_get_code(ev);
+        if (c != LV_EVENT_CLICKED && c != LV_EVENT_RELEASED) return;
         if (lv_tick_elaps(menu_opened_time) < 200) return;
         lv_obj_t * ov = (lv_obj_t *)lv_event_get_user_data(ev);
         lv_obj_del(ov);
-    }, LV_EVENT_CLICKED, overlay);
+    }, LV_EVENT_ALL, overlay);
 
-    // Container for flex layout
+    // Container for flex layout — Settings-style dark cards instead of the
+    // old solid blue/green/red buttons, so this matches build_settings_screen().
     lv_obj_t * cont = lv_obj_create(overlay);
-    lv_obj_set_size(cont, 380, 320);
+    lv_obj_set_size(cont, 420, 320);
     lv_obj_set_style_bg_opa(cont, 0, 0);
     lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, 0, 0); // default theme padding was shrinking
+                                          // the usable width below the 400px
+                                          // rows, triggering a horizontal scrollbar
+    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE); // this container never needs to scroll
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(cont, 14, 0);
     lv_obj_center(cont);
 
-    // Button 1: "Make Default"
-    lv_obj_t * btn_default = lv_btn_create(cont);
-    lv_obj_set_size(btn_default, 340, 90);
-    lv_obj_set_style_radius(btn_default, 15, 0);
-    lv_obj_set_style_translate_y(btn_default, 10, 0); // Shift down by 10 pixels
-    lv_obj_t * lbl_default = lv_label_create(btn_default);
-    lv_obj_set_style_text_font(lbl_default, &lv_font_montserrat_22, 0); // Increased size
-    lv_obj_center(lbl_default);
+    // cont's bounding box overlaps btn_close's lower edge (cont spans down
+    // from y~73, btn_close spans to y~100) — without this, cont (created
+    // after btn_close) sits on top in z-order and silently eats clicks in
+    // that overlap band, which is exactly what made the close button feel
+    // unresponsive near its bottom half.
+    lv_obj_move_foreground(btn_close);
+
+    // Row 1: "Default speedometer" — tap to make this screen the one that
+    // boots by default; shows a checkmark instead once it already is.
+    lv_obj_t * row_default = lv_obj_create(cont);
+    lv_obj_set_size(row_default, 400, 80);
+    lv_obj_set_style_bg_color(row_default, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(row_default, 255, 0);
+    lv_obj_set_style_border_width(row_default, 1, 0);
+    lv_obj_set_style_border_color(row_default, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(row_default, 12, 0);
+    lv_obj_clear_flag(row_default, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * lbl_default_title = lv_label_create(row_default);
+    lv_label_set_text(lbl_default_title, "Default speedometer");
+    lv_obj_set_style_text_font(lbl_default_title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(lbl_default_title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(lbl_default_title, LV_ALIGN_LEFT_MID, 14, 0);
+
+    lv_obj_t * lbl_default = lv_label_create(row_default);
+    lv_obj_set_style_text_font(lbl_default, &lv_font_montserrat_16, 0);
+    lv_obj_align(lbl_default, LV_ALIGN_RIGHT_MID, -16, 0);
 
     bool is_currently_default = (is_godzilla && default_speedometer == 1) || (!is_godzilla && default_speedometer == 0);
     if (is_currently_default) {
-        lv_label_set_text(lbl_default, "Current Default");
-        lv_obj_set_style_bg_color(btn_default, lv_color_hex(0x555555), 0);
-        lv_obj_clear_flag(btn_default, LV_OBJ_FLAG_CLICKABLE);
+        lv_label_set_text(lbl_default, LV_SYMBOL_OK " Default");
+        lv_obj_set_style_text_color(lbl_default, lv_color_hex(0xFFB020), 0);
     } else {
-        lv_label_set_text(lbl_default, "Make Default");
-        lv_obj_set_style_bg_color(btn_default, lv_color_hex(0x2196F3), 0); // Blue accent
+        lv_label_set_text(lbl_default, "Set as default");
+        lv_obj_set_style_text_color(lbl_default, lv_color_hex(0x888888), 0);
+        lv_obj_add_flag(row_default, LV_OBJ_FLAG_CLICKABLE);
 
-        lv_obj_add_event_cb(btn_default, [](lv_event_t * ev) {
+        lv_obj_add_event_cb(row_default, [](lv_event_t * ev) {
+            if (lv_event_get_code(ev) != LV_EVENT_CLICKED) return;
             if (lv_tick_elaps(menu_opened_time) < 200) return;
             bool is_godz_btn = (bool)(uintptr_t)lv_event_get_user_data(ev);
             save_speedo_preferences(is_godz_btn ? 1 : 0);
 
-            // Turn into "Current Default" dynamically
-            lv_obj_t * btn = lv_event_get_target(ev);
-            lv_obj_t * lbl = lv_obj_get_child(btn, 0);
-            lv_label_set_text(lbl, "Current Default");
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0x555555), 0);
-            lv_obj_clear_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-
-            // Close menu
-            lv_obj_t * cont = lv_obj_get_parent(btn);
+            // Close menu — the new default takes effect next time this
+            // screen (or the other speedometer) loads.
+            lv_obj_t * row = lv_event_get_target(ev);
+            lv_obj_t * cont = lv_obj_get_parent(row);
             lv_obj_t * overlay = lv_obj_get_parent(cont);
             lv_obj_del(overlay);
-        }, LV_EVENT_CLICKED, (void*)(uintptr_t)is_godzilla);
+        }, LV_EVENT_ALL, (void*)(uintptr_t)is_godzilla);
     }
 
-    // Spacer
-    lv_obj_t * spacer = lv_obj_create(cont);
-    lv_obj_set_size(spacer, 10, 15);
-    lv_obj_set_style_bg_opa(spacer, 0, 0);
-    lv_obj_set_style_border_width(spacer, 0, 0);
+    // Row 2: "Simulate OBD data" — a real switch, not a button whose own
+    // label doubled as a status readout (the old "Simulate OBD ON/OFF"
+    // button text read like a status display, not an action, and looked
+    // inverted: red coloring on "OFF" suggested danger/stop rather than
+    // "currently inactive"). A switch makes current state unambiguous.
+    lv_obj_t * row_sim = lv_obj_create(cont);
+    lv_obj_set_size(row_sim, 400, 80);
+    lv_obj_set_style_bg_color(row_sim, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(row_sim, 255, 0);
+    lv_obj_set_style_border_width(row_sim, 1, 0);
+    lv_obj_set_style_border_color(row_sim, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(row_sim, 12, 0);
+    lv_obj_clear_flag(row_sim, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Button 2: "Simulate OBD"
-    lv_obj_t * btn_sim = lv_btn_create(cont);
-    lv_obj_set_size(btn_sim, 340, 90);
-    lv_obj_set_style_radius(btn_sim, 15, 0);
-    lv_obj_t * lbl_sim = lv_label_create(btn_sim);
-    lv_obj_set_style_text_font(lbl_sim, &lv_font_montserrat_20, 0);
-    lv_obj_center(lbl_sim);
+    lv_obj_t * lbl_sim_title = lv_label_create(row_sim);
+    lv_label_set_text(lbl_sim_title, "Simulate OBD data");
+    lv_obj_set_style_text_font(lbl_sim_title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(lbl_sim_title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(lbl_sim_title, LV_ALIGN_LEFT_MID, 14, 0);
 
-    if (is_simulating_obd) {
-        lv_label_set_text(lbl_sim, "Simulate OBD ON");
-        lv_obj_set_style_bg_color(btn_sim, lv_color_hex(0x4CAF50), 0); // Green
-    } else {
-        lv_label_set_text(lbl_sim, "Simulate OBD OFF");
-        lv_obj_set_style_bg_color(btn_sim, lv_color_hex(0xE53935), 0); // Red
-    }
+    lv_obj_t * sw_sim = lv_switch_create(row_sim);
+    lv_obj_align(sw_sim, LV_ALIGN_RIGHT_MID, -20, 0);
+    lv_obj_set_size(sw_sim, 60, 30);
+    lv_obj_set_style_bg_color(sw_sim, lv_color_hex(0xFF6A00), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    if (is_simulating_obd) lv_obj_add_state(sw_sim, LV_STATE_CHECKED);
 
-    lv_obj_add_event_cb(btn_sim, [](lv_event_t * ev) {
-        if (lv_tick_elaps(menu_opened_time) < 200) return;
-        is_simulating_obd = !is_simulating_obd;
-
-        lv_obj_t * btn = lv_event_get_target(ev);
-        lv_obj_t * lbl = lv_obj_get_child(btn, 0);
-        if (is_simulating_obd) {
-            lv_label_set_text(lbl, "Simulate OBD ON");
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0x4CAF50), 0); // Green
-        } else {
-            lv_label_set_text(lbl, "Simulate OBD OFF");
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0xE53935), 0); // Red
-
+    lv_obj_add_event_cb(sw_sim, [](lv_event_t * ev) {
+        if (lv_event_get_code(ev) != LV_EVENT_VALUE_CHANGED) return;
+        lv_obj_t * sw = lv_event_get_target(ev);
+        is_simulating_obd = lv_obj_has_state(sw, LV_STATE_CHECKED);
+        if (!is_simulating_obd) {
             // Immediately reset simulation values to zero
             car_rpm = 0;
             car_speed = 0;
         }
-
-        // Close menu
-        lv_obj_t * cont = lv_obj_get_parent(btn);
-        lv_obj_t * overlay = lv_obj_get_parent(cont);
-        lv_obj_del(overlay);
-    }, LV_EVENT_CLICKED, NULL);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 }

@@ -49,12 +49,15 @@ extern "C" {
 // Global reference for PhotoFrameApp overlay
 extern lv_obj_t* ui_Panel2;
 
+// Gauge arc zones (engine load / coolant temp): amber/hot/redline, same
+// palette as the speedometer's RPM zones in screen_ui.h, just keyed by
+// percent-of-range instead of RPM.
 lv_color_t get_dynamic_color(float percent) {
     if (percent < 0.0f) percent = 0.0f;
     if (percent > 1.0f) percent = 1.0f;
-    if (percent < 0.40f) return lv_color_make(0, 150, 255); 
-    if (percent < 0.80f) return lv_color_make(0, 255, 0);   
-    return lv_color_make(255, 0, 0);                        
+    if (percent < 0.40f) return lv_color_hex(0xFFB020); // amber
+    if (percent < 0.80f) return lv_color_hex(0xFFC54D); // hot
+    return lv_color_hex(0xFF3B1D);                      // redline
 }
 
 // Device State
@@ -309,6 +312,33 @@ static void apply_brightness() {
     Serial.printf("[SETTINGS] Brightness %d → 0x%02X\n", brightness_level, raw);
 }
 
+static void make_settings_section_header(lv_obj_t * parent, const char * text) {
+    lv_obj_t * h = lv_label_create(parent);
+    lv_label_set_text(h, text);
+    lv_obj_set_width(h, 430);
+    lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_pad_left(h, 4, 0);
+    lv_obj_set_style_text_font(h, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(h, lv_color_hex(0xFF9500), 0);
+    lv_obj_set_style_pad_top(h, 6, 0);
+}
+
+// ─── Boot image: which image is remembered right now, regardless of on/off
+// state — used only to show a filename hint next to the toggle below. The
+// actual picking happens via the existing "SET AS BOOTLOADER" long-press
+// button in the Image Frame carousel (PhotoFrameApp.cpp); this toggle only
+// turns that already-chosen image on/off, it never lets you pick one here.
+static String get_remembered_boot_image_name() {
+    FILE* f = fopen("/sd_card/boot_img.txt", "r");
+    if (!f) f = fopen("/sd_card/boot_img.txt.disabled", "r");
+    if (!f) return String();
+    char buf[160] = {0};
+    if (fgets(buf, sizeof(buf), f)) buf[strcspn(buf, "\r\n")] = 0;
+    fclose(f);
+    const char * slash = strrchr(buf, '/');
+    return String(slash ? slash + 1 : buf);
+}
+
 void build_settings_screen() {
     if (settings_screen == NULL) {
         settings_screen = lv_obj_create(NULL);
@@ -349,6 +379,8 @@ void build_settings_screen() {
     // Use scroll_cont as parent for all rows
     lv_obj_t * scr_rows = scroll_cont;
 
+    make_settings_section_header(scr_rows, "DISPLAY");
+
     // ─── ROW 1: Brightness ───────────────────────────────────────────────────
     lv_obj_t * row1 = lv_obj_create(scr_rows);
     lv_obj_set_size(row1, 430, 80);
@@ -361,7 +393,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_bright = lv_label_create(row1);
     lv_label_set_text(lbl_bright, "Brightness");
-    lv_obj_set_style_text_font(lbl_bright, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_bright, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_bright, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_bright, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -384,13 +416,13 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_minus, 25, 0);
     lv_obj_t * lbl_minus = lv_label_create(btn_minus);
     lv_label_set_text(lbl_minus, "-");
-    lv_obj_set_style_text_font(lbl_minus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_minus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_minus);
 
     // value label
     lv_obj_t * lbl_val = lv_label_create(bright_cont);
     lv_label_set_text_fmt(lbl_val, "%d", brightness_level);
-    lv_obj_set_style_text_font(lbl_val, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_val, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_val, lv_color_hex(0xFF9500), 0);
 
     // + button
@@ -400,7 +432,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_plus, 25, 0);
     lv_obj_t * lbl_plus = lv_label_create(btn_plus);
     lv_label_set_text(lbl_plus, "+");
-    lv_obj_set_style_text_font(lbl_plus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_plus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_plus);
 
     // Wire callbacks
@@ -413,6 +445,8 @@ void build_settings_screen() {
         if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
         if (brightness_level < 10) { brightness_level++; apply_brightness(); lv_label_set_text_fmt((lv_obj_t*)lv_event_get_user_data(e), "%d", brightness_level); }
     }, LV_EVENT_ALL, lbl_val);
+
+    make_settings_section_header(scr_rows, "CONNECTIVITY");
 
     // ─── ROW 1.4: Wi-Fi settings (opens hotspot/QR overlay) ─────────────────
     lv_obj_t * row_wifi = lv_obj_create(scr_rows);
@@ -427,7 +461,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_wifi_s = lv_label_create(row_wifi);
     lv_label_set_text(lbl_wifi_s, "Wifi settings");
-    lv_obj_set_style_text_font(lbl_wifi_s, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_wifi_s, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_wifi_s, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_wifi_s, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -439,6 +473,8 @@ void build_settings_screen() {
     lv_obj_add_event_cb(row_wifi, [](lv_event_t * e) {
         if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
     }, LV_EVENT_ALL, NULL);
+
+    make_settings_section_header(scr_rows, "MODES");
 
     // ─── ROW 1.5: Jimny Look Toggle ─────────────────────────────────────────
     lv_obj_t * row_logo = lv_obj_create(scr_rows);
@@ -452,7 +488,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_logo = lv_label_create(row_logo);
     lv_label_set_text(lbl_logo, "Jimny mode");
-    lv_obj_set_style_text_font(lbl_logo, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_logo, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_logo, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_logo, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -501,7 +537,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_grid = lv_label_create(row_grid);
     lv_label_set_text(lbl_grid, "Grid Launcher");
-    lv_obj_set_style_text_font(lbl_grid, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_grid, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_grid, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_grid, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -524,7 +560,10 @@ void build_settings_screen() {
         Serial.printf("[SETTINGS] Grid Launcher set to %d\n", use_grid_launcher);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // ─── ROW 3: Boot time (Pre-created so we can pass to Row 2's callback) ────
+    make_settings_section_header(scr_rows, "BOOT IMAGE");
+
+    // ─── ROW 3: Boot duration (pre-created so Row 2's switch can show/hide
+    // it — only relevant once a custom boot image is actually toggled on).
     lv_obj_t * row3 = lv_obj_create(scr_rows);
     lv_obj_set_size(row3, 430, 80);
     lv_obj_set_style_bg_color(row3, lv_color_hex(0x1A1A1A), 0);
@@ -534,7 +573,9 @@ void build_settings_screen() {
     lv_obj_set_style_radius(row3, 12, 0);
     lv_obj_clear_flag(row3, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ─── ROW 2: Custom boot img ────────────────────────────────────────────
+    // ─── ROW 2: Boot image on/off — picking WHICH image happens via "SET AS
+    // BOOTLOADER" on a long-press in Image Frame (PhotoFrameApp.cpp); this is
+    // just the on/off switch for whatever's already been chosen there.
     lv_obj_t * row2 = lv_obj_create(scr_rows);
     lv_obj_set_size(row2, 430, 80);
     lv_obj_set_style_bg_color(row2, lv_color_hex(0x1A1A1A), 0);
@@ -543,15 +584,24 @@ void build_settings_screen() {
     lv_obj_set_style_border_color(row2, lv_color_hex(0x333333), 0);
     lv_obj_set_style_radius(row2, 12, 0);
     lv_obj_clear_flag(row2, LV_OBJ_FLAG_SCROLLABLE);
-    
-    // Move row3 down so it appears below row2
+
+    // row3 was created first (so this callback can reference it) but should
+    // appear below row2 — push it to the end of the flex flow.
     lv_obj_move_foreground(row3);
 
     lv_obj_t * lbl_boot = lv_label_create(row2);
-    lv_label_set_text(lbl_boot, "Custom boot img");
-    lv_obj_set_style_text_font(lbl_boot, &ui_font_rajdhani1, 0);
+    lv_label_set_text(lbl_boot, "Boot image");
+    lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_boot, LV_ALIGN_LEFT_MID, 14, 0);
+
+    String remembered_name = get_remembered_boot_image_name();
+    lv_obj_t * lbl_boot_sub = lv_label_create(row2);
+    lv_label_set_long_mode(lbl_boot_sub, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_boot_sub, 110);
+    lv_obj_set_style_text_font(lbl_boot_sub, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_boot_sub, lv_color_hex(0x888888), 0);
+    lv_obj_align(lbl_boot_sub, LV_ALIGN_RIGHT_MID, -75, 0);
 
     lv_obj_t * sw_boot = lv_switch_create(row2);
     lv_obj_align(sw_boot, LV_ALIGN_RIGHT_MID, -20, 0);
@@ -566,15 +616,17 @@ void build_settings_screen() {
 
     if (on_exists) {
         lv_obj_add_state(sw_boot, LV_STATE_CHECKED);
-        lv_obj_clear_flag(row3, LV_OBJ_FLAG_HIDDEN); // Show boot time setting
+        lv_label_set_text(lbl_boot_sub, remembered_name.c_str());
+        lv_obj_clear_flag(row3, LV_OBJ_FLAG_HIDDEN); // Show boot duration setting
     } else if (off_exists) {
         lv_obj_clear_state(sw_boot, LV_STATE_CHECKED);
-        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot time setting
+        lv_label_set_text(lbl_boot_sub, remembered_name.c_str());
+        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot duration setting
     } else {
-        // Neither file exists, disable standard control and label it
+        // Neither file exists — nothing chosen yet via Image Frame's long-press menu.
         lv_obj_add_state(sw_boot, LV_STATE_DISABLED);
-        lv_label_set_text(lbl_boot, "Custom boot img (Not Set)");
-        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot time setting
+        lv_label_set_text(lbl_boot_sub, "Not set");
+        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot duration setting
     }
 
     lv_obj_add_event_cb(sw_boot, [](lv_event_t * e) {
@@ -597,10 +649,9 @@ void build_settings_screen() {
         }
     }, LV_EVENT_VALUE_CHANGED, row3);
 
-    // ─── Build Row 3 (Boot time) elements ────────────────────────────────────
     lv_obj_t * lbl_boot_time = lv_label_create(row3);
-    lv_label_set_text(lbl_boot_time, "Boot time");
-    lv_obj_set_style_text_font(lbl_boot_time, &ui_font_rajdhani1, 0);
+    lv_label_set_text(lbl_boot_time, "Boot duration");
+    lv_obj_set_style_text_font(lbl_boot_time, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_boot_time, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_boot_time, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -626,13 +677,13 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_time_minus, 25, 0);
     lv_obj_t * lbl_time_minus = lv_label_create(btn_time_minus);
     lv_label_set_text(lbl_time_minus, "-");
-    lv_obj_set_style_text_font(lbl_time_minus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_time_minus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_time_minus);
 
     // value label
     lv_obj_t * lbl_time_val = lv_label_create(time_cont);
     lv_label_set_text_fmt(lbl_time_val, "%d s", current_boot_time);
-    lv_obj_set_style_text_font(lbl_time_val, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_time_val, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_time_val, lv_color_hex(0xFF9500), 0);
 
     // + button
@@ -642,7 +693,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_time_plus, 25, 0);
     lv_obj_t * lbl_time_plus = lv_label_create(btn_time_plus);
     lv_label_set_text(lbl_time_plus, "+");
-    lv_obj_set_style_text_font(lbl_time_plus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_time_plus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_time_plus);
 
     // Wire callbacks
