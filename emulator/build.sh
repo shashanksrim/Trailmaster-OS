@@ -32,7 +32,8 @@ g++ -std=c++17 -O1 $(pkg-config --cflags sdl2) \
   -DLV_CONF_INCLUDE_SIMPLE -DEMU_SDCARD_ROOT="\"$SDCARD_ROOT\"" \
   -c "$DIR/core/Arduino.cpp" -o "$OUT/Arduino.o"
 g++ -std=c++17 -O1 $(pkg-config --cflags sdl2) \
-  -I "$DIR/core" -I "$DIR/board" \
+  -I "$DIR/core" -I "$DIR/board" -I "$DIR/board/fake_esp_idf" -I "$SK" -I "$LVGL" -I "$LVGL/src" \
+  -DLV_CONF_INCLUDE_SIMPLE \
   -c "$DIR/runtime/main.cpp" -o "$OUT/main.o"
 for f in amoled_sim ft3168_sim qmi8658c_sim firmware_stubs; do
   g++ -std=c++17 -O1 \

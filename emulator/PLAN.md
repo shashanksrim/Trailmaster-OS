@@ -111,6 +111,39 @@ run+screenshot to avoid this confusion again.
 - **Day 4** — polish, write a short README for using the emulator with a
   *different* sketch, decide how it lives long-term (own repo? subfolder?).
 
+## Day 3 progress: multi-screen verification
+
+Added a debug-only hook in `emulator/runtime/main.cpp` (emulator-owned file,
+not the firmware): `EMU_FORCE_SCREEN=gauge|inclinometer|launcher` env var
+jumps to that screen right after `setup()`, so each screen can be
+screenshot-verified without simulating real touch/swipe gestures. Required
+wrapping the declarations in `extern "C" {}` to match the real SquareLine
+headers exactly (same linkage-mismatch class as before — these screen
+object pointers and `_screen_init` functions ARE wrapped in `extern "C"`
+in `ui_uigauge.h`/etc., easy to miss since the wrapper starts a few lines
+down, not at the very top of the file).
+
+**Screenshot-verified correct, via the real firmware code (not sim/'s
+hand-rebuilt approximations):**
+- **Speedometer** (default boot screen) — TRAILMASTER badge, gauge ring, 0 km/h / 0 rpm
+- **Gauges** — 0% engine load, 0°C coolant, **13.8V** battery (matches the
+  firmware's exact `car_voltage = 13.8` default — proves the real OBD
+  globals/logic are live, just never overwritten since WiFi never connects)
+- **Inclinometer** — 0° reading (matches qmi8658c_sim.cpp's fixed
+  "lying flat" fake IMU data), dual roll-arc gauges, Jimny silhouette
+- **Launcher** (grid mode) — all 7 app icons (SPEEDO/GAUGES/INCLINE/IMAGE/
+  GAMES/SYSTEM/ABOUT), steel borders, no text bleed-through
+
+**Not yet checked:** OTA overlay, About, Settings (should work — already
+incidentally seen once — but not deliberately re-verified after the
+EMU_FORCE_SCREEN addition), Image Frame (stubbed, expected blank),
+Games/NES (stubbed, expected blank).
+
+**Process note:** if screenshots come back showing the macOS desktop/lock
+screen instead of the emulator window, check whether the screen is
+actually locked (`screencapture` silently captures the lock screen) before
+assuming a rendering bug.
+
 ## Notes / decisions
 - This lives in `emulator/` at the repo root (not nested in the sketch
   folder), to make the "reusable, not Trailmaster-specific" intent visible

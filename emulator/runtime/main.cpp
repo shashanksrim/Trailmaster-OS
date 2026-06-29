@@ -5,11 +5,39 @@
 // file doesn't touch LVGL directly at all — it only feeds L1's shims
 // (g_emu_input) and displays what L1's Amoled shim wrote (g_emu_framebuffer).
 #include <SDL2/SDL.h>
+#include <cstdlib>
+#include <cstring>
 #include "emu_state.h"
+#include "lvgl.h"
 
 // Provided by the sketch (compiled as-is, unmodified).
 extern void setup();
 extern void loop();
+
+// Debug-only hook (this file is emulator-owned, not the firmware): set
+// EMU_FORCE_SCREEN=gauge|inclinometer|launcher to jump there after boot,
+// for screenshot verification without simulating real touch gestures.
+// All of these are declared extern "C" in the real headers (ui_uigauge.h
+// etc.) — must match exactly, since the .c files defining them are compiled
+// as plain C.
+extern "C" {
+    extern lv_obj_t *ui_uigauge, *ui_uiinclinometer, *ui_uilauncher;
+    void ui_uigauge_screen_init(void);
+    void ui_uiinclinometer_screen_init(void);
+    void ui_uilauncher_screen_init(void);
+    void _ui_screen_change(lv_obj_t **target, lv_scr_load_anim_t fademode, int spd, int delay, void (*target_init)(void));
+}
+
+static void emu_debug_force_screen() {
+    const char *which = std::getenv("EMU_FORCE_SCREEN");
+    if (!which) return;
+    if (std::strcmp(which, "gauge") == 0)
+        _ui_screen_change(&ui_uigauge, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_uigauge_screen_init);
+    else if (std::strcmp(which, "inclinometer") == 0)
+        _ui_screen_change(&ui_uiinclinometer, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_uiinclinometer_screen_init);
+    else if (std::strcmp(which, "launcher") == 0)
+        _ui_screen_change(&ui_uilauncher, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_uilauncher_screen_init);
+}
 
 int main(int, char**) {
     SDL_Init(SDL_INIT_VIDEO);
@@ -21,6 +49,7 @@ int main(int, char**) {
                                  SDL_TEXTUREACCESS_STREAMING, EMU_DISP_W, EMU_DISP_H);
 
     setup();
+    emu_debug_force_screen();
 
     bool running = true;
     while (running) {
