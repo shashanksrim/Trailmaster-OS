@@ -15,17 +15,24 @@ extern void setup();
 extern void loop();
 
 // Debug-only hook (this file is emulator-owned, not the firmware): set
-// EMU_FORCE_SCREEN=gauge|inclinometer|launcher to jump there after boot,
-// for screenshot verification without simulating real touch gestures.
-// All of these are declared extern "C" in the real headers (ui_uigauge.h
-// etc.) — must match exactly, since the .c files defining them are compiled
-// as plain C.
+// EMU_FORCE_SCREEN=gauge|inclinometer|launcher|settings|about to jump there
+// after boot, for screenshot verification without simulating real touch
+// gestures. The SquareLine screen objects/inits are declared extern "C" in
+// the real headers (ui_uigauge.h etc.) — must match exactly, since the .c
+// files defining them are compiled as plain C. build_settings_screen() and
+// build_about_screen() are defined directly in the .ino with ordinary C++
+// linkage, but the .ino's OWN forward declaration of them sits inside an
+// extern "C" block (its line ~99-103) — that governs the actual link-time
+// symbol names, so this declaration must match it (PLAN.md's note that no
+// extern "C" was needed here was wrong; the linker disagreed).
 extern "C" {
     extern lv_obj_t *ui_uigauge, *ui_uiinclinometer, *ui_uilauncher;
     void ui_uigauge_screen_init(void);
     void ui_uiinclinometer_screen_init(void);
     void ui_uilauncher_screen_init(void);
     void _ui_screen_change(lv_obj_t **target, lv_scr_load_anim_t fademode, int spd, int delay, void (*target_init)(void));
+    void build_settings_screen();
+    void build_about_screen();
 }
 
 static void emu_debug_force_screen() {
@@ -37,6 +44,10 @@ static void emu_debug_force_screen() {
         _ui_screen_change(&ui_uiinclinometer, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_uiinclinometer_screen_init);
     else if (std::strcmp(which, "launcher") == 0)
         _ui_screen_change(&ui_uilauncher, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_uilauncher_screen_init);
+    else if (std::strcmp(which, "settings") == 0)
+        build_settings_screen();
+    else if (std::strcmp(which, "about") == 0)
+        build_about_screen();
 }
 
 int main(int, char**) {

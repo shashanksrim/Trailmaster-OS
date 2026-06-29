@@ -134,24 +134,35 @@ hand-rebuilt approximations):**
 - **Launcher** (grid mode) — all 7 app icons (SPEEDO/GAUGES/INCLINE/IMAGE/
   GAMES/SYSTEM/ABOUT), steel borders, no text bleed-through
 
-**Not yet checked — exact next step for a fresh session:** OTA overlay,
-About, Settings. `EMU_FORCE_SCREEN` (in `emulator/runtime/main.cpp`)
-currently only handles `gauge`/`inclinometer`/`launcher` — these three are
-NOT wired up yet. Precise findings so this doesn't need re-deriving:
-- `build_settings_screen()` and `build_about_screen()` are plain functions
-  defined directly in the `.ino` with **default C++ linkage** (not
-  `extern "C"`, not `static`) — straightforward to add as two more
-  `else if` branches in `emu_debug_force_screen()`, declared as plain
-  `extern void build_settings_screen(); extern void build_about_screen();`
-  (no `extern "C"` wrapper needed for these two, unlike the SquareLine
-  screen functions).
-- `show_ota_update_overlay()` is `static` (internal linkage) inside
-  `ota_overlay_ui.h` — **cannot** be called directly from `main.cpp` via an
-  extern declaration. To reach it: call `build_about_screen()` first (the
-  About screen has the "Check for Update" button on it), then either (a)
-  screenshot the About screen itself as "good enough" verification, or
-  (b) simulate a touch/click on the button's screen coordinates via
-  `g_emu_input` to actually open the overlay for a deeper check.
+**Settings/About — done.** `EMU_FORCE_SCREEN=settings|about` now works
+(`emulator/runtime/main.cpp`). One correction to the note this section used
+to have: `build_settings_screen()`/`build_about_screen()` are plain C++
+functions, but the **.ino's own forward declaration of them sits inside an
+`extern "C"` block** (`.ino` line ~99-103, alongside `build_rom_menu()`
+etc.) — that's what actually governs the link-time symbol name, so
+`main.cpp`'s declaration had to be `extern "C"` too, or the link failed
+with "declaration possibly missing `extern \"C\"`". The previous session's
+note claiming no `extern "C"` was needed was wrong.
+
+Screenshot-verified:
+- **Settings** — Brightness +/-, Wifi settings row, Jimny mode toggle, Grid
+  Launcher toggle, dark theme — matches real device.
+- **About** — page 1 (gesture hints: swipe-down-to-exit arrow, left/right +
+  long-press hint, pagination dots) renders correctly.
+
+**OTA overlay — accepted as sufficiently verified without going deeper.**
+`show_ota_update_overlay()` is `static` (internal linkage) inside
+`ota_overlay_ui.h`, so it can't be reached via an extern declaration from
+`main.cpp` — confirmed, matches the original note. The "Check for Update"
+button that opens it lives on About's **page 2** (horizontal swipe target,
+`.ino` line ~897), which would need a multi-frame simulated touch-drag
+through `g_emu_input` (touch-down + incremental move + touch-up across
+several `loop()` calls) to scroll to, since LVGL's scroll-snap needs real
+indev polling over time, not a single jump. Decided not to build that:
+`OTAManager` itself is stubbed this pass (no real network OTA code behind
+the button to exercise), so reaching the overlay would only prove the
+button is clickable, not exercise new logic. Page-1 About screenshot above
+is the accepted verification for this screen.
 
 Image Frame / Games are deliberately stubbed (PhotoFrameApp.cpp /
 RetroEngine/NesEngine not compiled this pass) — expected to render blank,
