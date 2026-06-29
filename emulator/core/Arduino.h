@@ -20,6 +20,7 @@ inline uint32_t millis() {
 }
 inline void delay(uint32_t ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 inline void delayMicroseconds(uint32_t us) { std::this_thread::sleep_for(std::chrono::microseconds(us)); }
+inline void yield() {}
 
 // ── Serial ────────────────────────────────────────────────────────────────────
 struct SerialClass {
@@ -38,3 +39,42 @@ extern SerialClass Serial;
 
 // ── String (very small subset — most sketches use it like a std::string) ─────
 using String = std::string;
+
+// ── FreeRTOS task primitives (Arduino-ESP32 makes these globally available
+// after including Arduino.h, without a separate freertos/*.h include) ───────
+using TaskHandle_t = void*;
+inline uint32_t pdMS_TO_TICKS(uint32_t ms) { return ms; }
+#define portTICK_PERIOD_MS 1
+
+inline void vTaskDelay(uint32_t ticks) { delay(ticks); }
+inline void vTaskDelete(TaskHandle_t) {}
+
+// Runs the task function on a real detached thread — close enough to a
+// FreeRTOS pinned task for a host simulation (core affinity is meaningless
+// on a desktop CPU anyway).
+inline void xTaskCreatePinnedToCore(void (*fn)(void*), const char* /*name*/,
+                                     uint32_t /*stackDepth*/, void* arg,
+                                     uint32_t /*priority*/, TaskHandle_t* handle,
+                                     int /*core*/) {
+    std::thread t(fn, arg);
+    t.detach();
+    if (handle) *handle = nullptr;
+}
+
+// ── random() — used by a couple of the games ──────────────────────────────────
+#include <cstdlib>
+inline long random(long max) { return max > 0 ? std::rand() % max : 0; }
+inline long random(long min, long max) { return max > min ? min + std::rand() % (max - min) : min; }
+
+// ── Misc Arduino-ESP32-core globals the real Arduino.h pulls in transitively ──
+#ifndef PI
+#define PI 3.14159265358979323846
+#endif
+#define RTC_DATA_ATTR // RTC memory persistence across deep-sleep doesn't apply on host
+
+#include "esp_heap_caps.h"
+inline uint32_t esp_get_free_heap_size() { return 8 * 1024 * 1024; }
+inline size_t heap_caps_get_free_size(uint32_t) { return 8 * 1024 * 1024; }
+
+// ── /sd_card path redirection (must come after all of the above; see file) ──
+#include "sdcard_shim.h"
