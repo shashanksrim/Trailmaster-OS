@@ -59,11 +59,12 @@ cd ~/Documents/GitHub/Trailmaster-OS-dev
 A real window should open. Bring it forward and screenshot if you need to
 verify visually (`osascript ... frontmost ...` then `screencapture -x`).
 
-**Known open item:** it boots to the Settings screen instead of the
-speedometer. Not yet root-caused — investigate this first in a fresh
-session. Likely something in `setup()`'s default-screen logic interacting
-with a stubbed dependency (e.g. `default_speedometer`/Preferences default,
-or the onboarding-overlay logic reacting to the stubbed SD/WiFi state).
+**Resolved (was a false lead):** earlier it looked like it booted to the
+Settings screen instead of the speedometer — turned out to be a stale
+leftover window from a previous test run, not real behavior. A clean run
+(`pkill -f trailmaster_emulator` first, then run + screenshot) correctly
+shows the Speedometer at boot. No bug. Always kill any old process before
+screenshotting to avoid this confusion.
 
 **What's deliberately stubbed this pass** (see `emulator/board/firmware_stubs.cpp`):
 PhotoFrameApp (WiFi portal/photos), OTAManager (real network OTA), GIF/PSRAM

@@ -65,9 +65,14 @@ settings row, Jimny mode / Grid Launcher toggles, dark theme).
   prevent dead-code elimination — its only caller in this reduced build is
   a `.c` file, so there was no "real" call site forcing emission.
 
-**Open follow-up:** boots to the Settings screen, not the speedometer —
-worth investigating, but not evidence the pipeline is broken (the render
-itself is confirmed pixel-correct).
+**Update (next session):** the "boots to Settings, not speedometer" note
+below was a **false observation** — a stale/leftover process window from
+inconsistent cleanup between test runs, not real emulator behavior. A clean
+re-run (kill any old process first, then run+screenshot) correctly shows the
+**Speedometer** screen at boot (TRAILMASTER badge, gauge ring, "0 km/h",
+"0 rpm" — no live OBD data since WiFi never connects, as expected with the
+stubs). No bug here. Always `pkill -f trailmaster_emulator` before a fresh
+run+screenshot to avoid this confusion again.
 
 ## Day-by-day
 
