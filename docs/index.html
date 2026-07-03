@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Trailmaster-OS — Firmware Flasher</title>
+  <title>Trailmaster-OS — Flasher</title>
   <style>
     :root { --orange:#FF6A00; --bg:#0d0d0d; --card:#1a1a1a; --text:#f5f5f5; --muted:#888; }
     * { box-sizing:border-box; }
@@ -16,45 +16,66 @@
     .header p { color:var(--muted); margin:6px 0 0; font-size:14px; }
     .card { background:var(--card); border:1px solid #2a2a2a; border-radius:16px;
       padding:28px; max-width:480px; width:100%; margin-top:24px; box-shadow:0 8px 24px rgba(0,0,0,.5); }
+    .card-title { font-size:13px; text-transform:uppercase; letter-spacing:1px;
+      color:var(--muted); margin:0 0 16px; }
     .ver { display:flex; align-items:baseline; gap:8px; justify-content:center; margin-bottom:20px; }
     .ver .label { color:var(--muted); font-size:14px; }
     .ver .num { color:var(--orange); font-size:28px; font-weight:700; }
     .flash-wrap { display:flex; justify-content:center; margin:16px 0 8px; }
     esp-web-install-button { --esp-tools-button-color:#fff; --esp-tools-button-text-color:#000; }
+    .btn { display:inline-block; padding:16px 28px; border-radius:12px; font-size:16px;
+      font-weight:700; text-transform:uppercase; letter-spacing:1px; cursor:pointer;
+      border:none; font-family:inherit; transition:opacity .15s; }
+    .btn:disabled { opacity:.45; cursor:not-allowed; }
+    .btn-orange { background:var(--orange); color:#fff; }
+    .btn-outline { background:transparent; color:var(--orange);
+      border:2px solid var(--orange); }
     .steps { color:var(--muted); font-size:13px; line-height:1.7; margin-top:18px; }
     .steps b { color:var(--text); }
     .note { background:#2a1a0a; border:1px solid #5a3a10; color:#ffc38a; font-size:12.5px;
       border-radius:10px; padding:12px 14px; margin-top:18px; line-height:1.5; }
-    .unsupported { display:none; color:#ff6b6b; font-size:13px; margin-top:12px; text-align:center; }
+    .safe-note { background:#0a1f0a; border:1px solid #1a5a1a; color:#8fda8f; font-size:12.5px;
+      border-radius:10px; padding:12px 14px; margin-top:12px; line-height:1.5; }
     code { background:#000; padding:2px 6px; border-radius:5px; color:#9cf; }
     footer { color:#555; font-size:12px; margin-top:28px; text-align:center; }
     footer a { color:#777; }
+
+    /* SD progress UI */
+    #sd-status { min-height:40px; margin-top:14px; font-size:13px;
+      color:var(--muted); text-align:center; line-height:1.6; }
+    #sd-status.ok  { color:#8fda8f; }
+    #sd-status.err { color:#ff7070; }
+    #sd-bar-wrap { display:none; background:#111; border-radius:8px;
+      overflow:hidden; height:8px; margin-top:10px; }
+    #sd-bar { height:100%; width:0%; background:var(--orange);
+      transition:width .1s linear; }
+    .file-list { color:#666; font-size:11.5px; margin-top:8px;
+      max-height:80px; overflow:hidden; text-align:left;
+      padding:0 4px; line-height:1.6; }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>TRAIL<span>MASTER</span></h1>
-    <p>ESP32-S3 Firmware Flasher</p>
+    <p>ESP32-S3 1.43″ AMOLED · Jimny Dash</p>
   </div>
 
+  <!-- ── Firmware card ─────────────────────────────────────────────────── -->
   <div class="card">
+    <p class="card-title">Firmware</p>
     <div class="ver">
-      <span class="label">Latest firmware:</span>
+      <span class="label">Latest:</span>
       <span class="num" id="ver">…</span>
     </div>
 
     <div class="flash-wrap">
       <esp-web-install-button manifest="./manifest.json">
-        <button slot="activate" style="background:var(--orange);color:#fff;border:none;
-          padding:16px 28px;border-radius:12px;font-size:16px;font-weight:700;
-          text-transform:uppercase;letter-spacing:1px;cursor:pointer;">
-          ⚡ Flash via USB
-        </button>
-        <span slot="unsupported" class="unsupported" style="display:block">
-          Your browser can’t flash over USB. Use <b>Chrome</b> or <b>Edge</b> on a desktop.
+        <button slot="activate" class="btn btn-orange">⚡ Flash Firmware via USB</button>
+        <span slot="unsupported" style="display:block;color:#ff7070;font-size:13px;margin-top:8px;text-align:center">
+          Your browser can't flash over USB. Use <b>Chrome</b> or <b>Edge</b> on a desktop.
         </span>
-        <span slot="not-allowed" class="unsupported" style="display:block">
-          USB access was blocked. This page must be served over HTTPS.
+        <span slot="not-allowed" style="display:block;color:#ff7070;font-size:13px;margin-top:8px;text-align:center">
+          USB access blocked. Page must be served over HTTPS.
         </span>
       </esp-web-install-button>
     </div>
@@ -62,16 +83,54 @@
     <div id="changelog" style="text-align:center;color:var(--muted);font-size:13px;min-height:16px;"></div>
 
     <div class="steps">
-      <b>How to flash:</b><br>
-      1. Plug the device into this computer with a USB cable.<br>
-      2. Click <b>Flash via USB</b> above.<br>
-      3. In the popup, pick the port named like <code>usbmodem…</code> (or <code>USB JTAG/serial</code>).<br>
-      4. Wait for it to finish, then the device reboots into the new firmware.
+      <b>How to flash firmware:</b><br>
+      1. Plug the device into this computer via USB.<br>
+      2. Click <b>Flash Firmware via USB</b> above.<br>
+      3. Pick the port named like <code>usbmodem…</code> or <code>USB JTAG/serial</code>.<br>
+      4. Wait for it to finish — device reboots automatically.
     </div>
 
     <div class="note">
-      <b>Chrome or Edge on desktop only.</b> Web USB flashing isn’t supported in Safari,
-      Firefox, or on phones. Saved Wi-Fi networks are preserved (no full erase).
+      <b>Chrome or Edge on desktop only.</b> Web USB isn't supported in Safari,
+      Firefox, or on phones. Wi-Fi credentials are preserved (no full erase).
+    </div>
+  </div>
+
+  <!-- ── SD card card ──────────────────────────────────────────────────── -->
+  <div class="card">
+    <p class="card-title">SD Card contents</p>
+
+    <div style="color:var(--muted);font-size:13px;line-height:1.7;margin-bottom:18px;">
+      Writes the required game &amp; speedometer files to your SD card:<br>
+      speedometer GIFs, splash screen, NES/SMS ROMs, boot image assets.
+      <br><em style="font-size:12px">Your uploaded photos and custom files are not touched.</em>
+    </div>
+
+    <div class="flash-wrap">
+      <button id="sd-btn" class="btn btn-outline" onclick="flashSD()">
+        📂 Flash SD Card
+      </button>
+    </div>
+
+    <div id="sd-bar-wrap"><div id="sd-bar"></div></div>
+    <div id="sd-status"></div>
+
+    <div class="steps">
+      <b>How to flash SD card:</b><br>
+      1. Insert the SD card into a card reader on this computer.<br>
+      2. Click <b>Flash SD Card</b> above.<br>
+      3. In the system dialog, select the <b>SD card's root folder</b>.<br>
+      4. The browser writes the files directly — no install needed.
+    </div>
+
+    <div class="note">
+      <b>Chrome or Edge on desktop only.</b> Firefox and Safari don't support
+      the File System Access API needed to write to an SD card from the browser.
+    </div>
+
+    <div class="safe-note">
+      ✓ <b>Safe to run on a card that already has photos.</b> Only the specific
+      game and speedometer files are written — nothing is deleted.
     </div>
   </div>
 
@@ -82,15 +141,115 @@
   </footer>
 
   <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script>
-    // Show the live version + changelog from the same version.json the OTA uses.
+    // ── Version display ──────────────────────────────────────────────────
     fetch("https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/version.json?t=" + Date.now())
       .then(r => r.json())
       .then(j => {
         document.getElementById("ver").textContent = "v" + (j.version || "?");
         if (j.changelog) document.getElementById("changelog").textContent = j.changelog;
       })
-      .catch(() => { document.getElementById("ver").textContent = "v3.1"; });
+      .catch(() => { document.getElementById("ver").textContent = "?"; });
+
+    // ── SD card flash ────────────────────────────────────────────────────
+    async function flashSD() {
+      const btn    = document.getElementById("sd-btn");
+      const status = document.getElementById("sd-status");
+      const barWrap = document.getElementById("sd-bar-wrap");
+      const bar    = document.getElementById("sd-bar");
+
+      const setStatus = (msg, cls = "") => {
+        status.textContent = msg;
+        status.className = cls;
+      };
+      const setBar = pct => { bar.style.width = pct + "%"; };
+
+      // Check browser support
+      if (!window.showDirectoryPicker) {
+        setStatus("❌ Your browser doesn't support this. Use Chrome or Edge on desktop.", "err");
+        return;
+      }
+
+      // 1. Pick the SD card directory
+      let dirHandle;
+      try {
+        dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+      } catch (e) {
+        if (e.name === "AbortError") return; // user cancelled — silent
+        setStatus("❌ Could not open folder: " + e.message, "err");
+        return;
+      }
+
+      btn.disabled = true;
+      barWrap.style.display = "block";
+      setBar(0);
+      setStatus("Downloading SD card contents…");
+
+      // 2. Download the zip
+      let blob;
+      try {
+        const resp = await fetch("./sd_files.zip");
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        blob = await resp.blob();
+      } catch (e) {
+        setStatus("❌ Download failed: " + e.message, "err");
+        btn.disabled = false; barWrap.style.display = "none";
+        return;
+      }
+      setBar(20);
+      setStatus("Unpacking…");
+
+      // 3. Parse the zip
+      let zip;
+      try {
+        zip = await JSZip.loadAsync(blob);
+      } catch (e) {
+        setStatus("❌ Couldn't read zip: " + e.message, "err");
+        btn.disabled = false; barWrap.style.display = "none";
+        return;
+      }
+
+      // Helper: get or create nested directory handles
+      async function getDirHandle(root, pathParts) {
+        let cur = root;
+        for (const part of pathParts) {
+          cur = await cur.getDirectoryHandle(part, { create: true });
+        }
+        return cur;
+      }
+
+      // 4. Write every file in the zip to the chosen directory
+      const entries = Object.keys(zip.files).filter(n => !zip.files[n].dir);
+      const total   = entries.length;
+      let done      = 0;
+      const written = [];
+
+      try {
+        for (const name of entries) {
+          const parts    = name.split("/");
+          const filename = parts.pop();
+          const parent   = await getDirHandle(dirHandle, parts);
+          const fileHandle = await parent.getFileHandle(filename, { create: true });
+          const writable   = await fileHandle.createWritable();
+          const content    = await zip.files[name].async("arraybuffer");
+          await writable.write(content);
+          await writable.close();
+          done++;
+          written.push(name);
+          setBar(20 + Math.round((done / total) * 78));
+          setStatus(`Writing ${done}/${total}: ${name}`);
+        }
+      } catch (e) {
+        setStatus("❌ Write failed: " + e.message + " — check SD card isn't locked.", "err");
+        btn.disabled = false;
+        return;
+      }
+
+      setBar(100);
+      setStatus(`✓ Done — ${total} files written to "${dirHandle.name}"`, "ok");
+      btn.disabled = false;
+    }
   </script>
 </body>
 </html>
