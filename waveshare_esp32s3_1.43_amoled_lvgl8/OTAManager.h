@@ -1,5 +1,7 @@
 #pragma once
+#ifndef LV_SIM_BUILD
 #include <Arduino.h>
+#endif
 
 // ── OTA Status ────────────────────────────────────────────────────────────────
 enum OTAState {

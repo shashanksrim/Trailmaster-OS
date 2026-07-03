@@ -49,12 +49,15 @@ extern "C" {
 // Global reference for PhotoFrameApp overlay
 extern lv_obj_t* ui_Panel2;
 
+// Gauge arc zones (engine load / coolant temp): amber/hot/redline, same
+// palette as the speedometer's RPM zones in screen_ui.h, just keyed by
+// percent-of-range instead of RPM.
 lv_color_t get_dynamic_color(float percent) {
     if (percent < 0.0f) percent = 0.0f;
     if (percent > 1.0f) percent = 1.0f;
-    if (percent < 0.40f) return lv_color_make(0, 150, 255); 
-    if (percent < 0.80f) return lv_color_make(0, 255, 0);   
-    return lv_color_make(255, 0, 0);                        
+    if (percent < 0.40f) return lv_color_hex(0xFFB020); // amber
+    if (percent < 0.80f) return lv_color_hex(0xFFC54D); // hot
+    return lv_color_hex(0xFF3B1D);                      // redline
 }
 
 // Device State
@@ -78,7 +81,7 @@ static int brightness_level = 8; // 1-10, default 8 (~200/255)
 int use_grid_launcher = 1; // 1 = grid, 0 = list
 int use_jimny_logo = 0; // 1 = jimny logo, 0 = custom/trailmaster (Default OFF as requested)
 lv_obj_t * sel_bar = NULL;
-static lv_obj_t * grid_container = NULL;
+lv_obj_t * grid_container = NULL;
 
 // --- JIMNY DASHBOARD STATE ---
 bool imu_ready = false;
@@ -120,7 +123,7 @@ extern void pf_show_upload_overlay(void);
 extern bool pf_autostart_wifi;   // defined in PhotoFrameApp.cpp
 
 // --- SHARED UI LOGIC ---
-static bool ignore_until_lift = false;
+bool ignore_until_lift = false;
 
 // --- OBD Wi-Fi Connectivity Configuration ---
 const char* obd_ssid = "WiFi_OBDII"; 
@@ -309,6 +312,33 @@ static void apply_brightness() {
     Serial.printf("[SETTINGS] Brightness %d → 0x%02X\n", brightness_level, raw);
 }
 
+static void make_settings_section_header(lv_obj_t * parent, const char * text) {
+    lv_obj_t * h = lv_label_create(parent);
+    lv_label_set_text(h, text);
+    lv_obj_set_width(h, 430);
+    lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_pad_left(h, 4, 0);
+    lv_obj_set_style_text_font(h, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(h, lv_color_hex(0xFF9500), 0);
+    lv_obj_set_style_pad_top(h, 6, 0);
+}
+
+// ─── Boot image: which image is remembered right now, regardless of on/off
+// state — used only to show a filename hint next to the toggle below. The
+// actual picking happens via the existing "SET AS BOOTLOADER" long-press
+// button in the Image Frame carousel (PhotoFrameApp.cpp); this toggle only
+// turns that already-chosen image on/off, it never lets you pick one here.
+static String get_remembered_boot_image_name() {
+    FILE* f = fopen("/sd_card/boot_img.txt", "r");
+    if (!f) f = fopen("/sd_card/boot_img.txt.disabled", "r");
+    if (!f) return String();
+    char buf[160] = {0};
+    if (fgets(buf, sizeof(buf), f)) buf[strcspn(buf, "\r\n")] = 0;
+    fclose(f);
+    const char * slash = strrchr(buf, '/');
+    return String(slash ? slash + 1 : buf);
+}
+
 void build_settings_screen() {
     if (settings_screen == NULL) {
         settings_screen = lv_obj_create(NULL);
@@ -349,6 +379,8 @@ void build_settings_screen() {
     // Use scroll_cont as parent for all rows
     lv_obj_t * scr_rows = scroll_cont;
 
+    make_settings_section_header(scr_rows, "DISPLAY");
+
     // ─── ROW 1: Brightness ───────────────────────────────────────────────────
     lv_obj_t * row1 = lv_obj_create(scr_rows);
     lv_obj_set_size(row1, 430, 80);
@@ -361,7 +393,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_bright = lv_label_create(row1);
     lv_label_set_text(lbl_bright, "Brightness");
-    lv_obj_set_style_text_font(lbl_bright, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_bright, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_bright, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_bright, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -384,13 +416,13 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_minus, 25, 0);
     lv_obj_t * lbl_minus = lv_label_create(btn_minus);
     lv_label_set_text(lbl_minus, "-");
-    lv_obj_set_style_text_font(lbl_minus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_minus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_minus);
 
     // value label
     lv_obj_t * lbl_val = lv_label_create(bright_cont);
     lv_label_set_text_fmt(lbl_val, "%d", brightness_level);
-    lv_obj_set_style_text_font(lbl_val, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_val, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_val, lv_color_hex(0xFF9500), 0);
 
     // + button
@@ -400,7 +432,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_plus, 25, 0);
     lv_obj_t * lbl_plus = lv_label_create(btn_plus);
     lv_label_set_text(lbl_plus, "+");
-    lv_obj_set_style_text_font(lbl_plus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_plus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_plus);
 
     // Wire callbacks
@@ -413,6 +445,8 @@ void build_settings_screen() {
         if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
         if (brightness_level < 10) { brightness_level++; apply_brightness(); lv_label_set_text_fmt((lv_obj_t*)lv_event_get_user_data(e), "%d", brightness_level); }
     }, LV_EVENT_ALL, lbl_val);
+
+    make_settings_section_header(scr_rows, "CONNECTIVITY");
 
     // ─── ROW 1.4: Wi-Fi settings (opens hotspot/QR overlay) ─────────────────
     lv_obj_t * row_wifi = lv_obj_create(scr_rows);
@@ -427,7 +461,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_wifi_s = lv_label_create(row_wifi);
     lv_label_set_text(lbl_wifi_s, "Wifi settings");
-    lv_obj_set_style_text_font(lbl_wifi_s, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_wifi_s, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_wifi_s, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_wifi_s, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -439,6 +473,8 @@ void build_settings_screen() {
     lv_obj_add_event_cb(row_wifi, [](lv_event_t * e) {
         if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
     }, LV_EVENT_ALL, NULL);
+
+    make_settings_section_header(scr_rows, "MODES");
 
     // ─── ROW 1.5: Jimny Look Toggle ─────────────────────────────────────────
     lv_obj_t * row_logo = lv_obj_create(scr_rows);
@@ -452,7 +488,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_logo = lv_label_create(row_logo);
     lv_label_set_text(lbl_logo, "Jimny mode");
-    lv_obj_set_style_text_font(lbl_logo, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_logo, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_logo, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_logo, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -501,7 +537,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_grid = lv_label_create(row_grid);
     lv_label_set_text(lbl_grid, "Grid Launcher");
-    lv_obj_set_style_text_font(lbl_grid, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_grid, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_grid, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_grid, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -524,7 +560,10 @@ void build_settings_screen() {
         Serial.printf("[SETTINGS] Grid Launcher set to %d\n", use_grid_launcher);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // ─── ROW 3: Boot time (Pre-created so we can pass to Row 2's callback) ────
+    make_settings_section_header(scr_rows, "BOOT IMAGE");
+
+    // ─── ROW 3: Boot duration (pre-created so Row 2's switch can show/hide
+    // it — only relevant once a custom boot image is actually toggled on).
     lv_obj_t * row3 = lv_obj_create(scr_rows);
     lv_obj_set_size(row3, 430, 80);
     lv_obj_set_style_bg_color(row3, lv_color_hex(0x1A1A1A), 0);
@@ -534,7 +573,9 @@ void build_settings_screen() {
     lv_obj_set_style_radius(row3, 12, 0);
     lv_obj_clear_flag(row3, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ─── ROW 2: Custom boot img ────────────────────────────────────────────
+    // ─── ROW 2: Boot image on/off — picking WHICH image happens via "SET AS
+    // BOOTLOADER" on a long-press in Image Frame (PhotoFrameApp.cpp); this is
+    // just the on/off switch for whatever's already been chosen there.
     lv_obj_t * row2 = lv_obj_create(scr_rows);
     lv_obj_set_size(row2, 430, 80);
     lv_obj_set_style_bg_color(row2, lv_color_hex(0x1A1A1A), 0);
@@ -543,15 +584,24 @@ void build_settings_screen() {
     lv_obj_set_style_border_color(row2, lv_color_hex(0x333333), 0);
     lv_obj_set_style_radius(row2, 12, 0);
     lv_obj_clear_flag(row2, LV_OBJ_FLAG_SCROLLABLE);
-    
-    // Move row3 down so it appears below row2
+
+    // row3 was created first (so this callback can reference it) but should
+    // appear below row2 — push it to the end of the flex flow.
     lv_obj_move_foreground(row3);
 
     lv_obj_t * lbl_boot = lv_label_create(row2);
-    lv_label_set_text(lbl_boot, "Custom boot img");
-    lv_obj_set_style_text_font(lbl_boot, &ui_font_rajdhani1, 0);
+    lv_label_set_text(lbl_boot, "Boot image");
+    lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_boot, LV_ALIGN_LEFT_MID, 14, 0);
+
+    String remembered_name = get_remembered_boot_image_name();
+    lv_obj_t * lbl_boot_sub = lv_label_create(row2);
+    lv_label_set_long_mode(lbl_boot_sub, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_boot_sub, 110);
+    lv_obj_set_style_text_font(lbl_boot_sub, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_boot_sub, lv_color_hex(0x888888), 0);
+    lv_obj_align(lbl_boot_sub, LV_ALIGN_RIGHT_MID, -75, 0);
 
     lv_obj_t * sw_boot = lv_switch_create(row2);
     lv_obj_align(sw_boot, LV_ALIGN_RIGHT_MID, -20, 0);
@@ -566,15 +616,17 @@ void build_settings_screen() {
 
     if (on_exists) {
         lv_obj_add_state(sw_boot, LV_STATE_CHECKED);
-        lv_obj_clear_flag(row3, LV_OBJ_FLAG_HIDDEN); // Show boot time setting
+        lv_label_set_text(lbl_boot_sub, remembered_name.c_str());
+        lv_obj_clear_flag(row3, LV_OBJ_FLAG_HIDDEN); // Show boot duration setting
     } else if (off_exists) {
         lv_obj_clear_state(sw_boot, LV_STATE_CHECKED);
-        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot time setting
+        lv_label_set_text(lbl_boot_sub, remembered_name.c_str());
+        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot duration setting
     } else {
-        // Neither file exists, disable standard control and label it
+        // Neither file exists — nothing chosen yet via Image Frame's long-press menu.
         lv_obj_add_state(sw_boot, LV_STATE_DISABLED);
-        lv_label_set_text(lbl_boot, "Custom boot img (Not Set)");
-        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot time setting
+        lv_label_set_text(lbl_boot_sub, "Not set");
+        lv_obj_add_flag(row3, LV_OBJ_FLAG_HIDDEN); // Hide boot duration setting
     }
 
     lv_obj_add_event_cb(sw_boot, [](lv_event_t * e) {
@@ -597,10 +649,9 @@ void build_settings_screen() {
         }
     }, LV_EVENT_VALUE_CHANGED, row3);
 
-    // ─── Build Row 3 (Boot time) elements ────────────────────────────────────
     lv_obj_t * lbl_boot_time = lv_label_create(row3);
-    lv_label_set_text(lbl_boot_time, "Boot time");
-    lv_obj_set_style_text_font(lbl_boot_time, &ui_font_rajdhani1, 0);
+    lv_label_set_text(lbl_boot_time, "Boot duration");
+    lv_obj_set_style_text_font(lbl_boot_time, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_boot_time, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_boot_time, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -626,13 +677,13 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_time_minus, 25, 0);
     lv_obj_t * lbl_time_minus = lv_label_create(btn_time_minus);
     lv_label_set_text(lbl_time_minus, "-");
-    lv_obj_set_style_text_font(lbl_time_minus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_time_minus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_time_minus);
 
     // value label
     lv_obj_t * lbl_time_val = lv_label_create(time_cont);
     lv_label_set_text_fmt(lbl_time_val, "%d s", current_boot_time);
-    lv_obj_set_style_text_font(lbl_time_val, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_time_val, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_time_val, lv_color_hex(0xFF9500), 0);
 
     // + button
@@ -642,7 +693,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_time_plus, 25, 0);
     lv_obj_t * lbl_time_plus = lv_label_create(btn_time_plus);
     lv_label_set_text(lbl_time_plus, "+");
-    lv_obj_set_style_text_font(lbl_time_plus, &ui_font_rajdhani1, 0);
+    lv_obj_set_style_text_font(lbl_time_plus, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_time_plus);
 
     // Wire callbacks
@@ -678,136 +729,9 @@ void build_settings_screen() {
 
 
 // ─── OTA UPDATE OVERLAY ──────────────────────────────────────────────────────
-// Full-screen overlay that shows update status/progress (instead of a label
-// under the button). Opening it kicks off the version check automatically.
-static lv_obj_t * ota_overlay     = NULL;
-static lv_obj_t * ota_ov_status   = NULL;
-static lv_obj_t * ota_ov_bar      = NULL;
-static lv_obj_t * ota_ov_btn      = NULL;
-static lv_obj_t * ota_ov_btn_lbl  = NULL;
-static lv_timer_t * ota_ov_timer  = NULL;
-
-static void ota_overlay_close() {
-    if (ota_overlay && lv_obj_is_valid(ota_overlay)) lv_obj_del(ota_overlay); // DELETE cb clears the rest
-}
-
-static void ota_overlay_refresh(lv_timer_t * t) {
-    const OTAStatus* st = ota_get_status();
-    // Single, consistent palette: neutral text (red only on failure), grey
-    // progress bar, orange action button — no per-state colour switching.
-    if (ota_ov_status && lv_obj_is_valid(ota_ov_status)) {
-        lv_label_set_text(ota_ov_status, st->status_text);
-        bool failed = (st->state == OTA_FAILED_NO_WIFI ||
-                       st->state == OTA_FAILED_SERVER ||
-                       st->state == OTA_FAILED_FLASH);
-        lv_obj_set_style_text_color(ota_ov_status, lv_color_hex(failed ? 0xFF3333 : 0xCCCCCC), 0);
-    }
-    if (ota_ov_bar && lv_obj_is_valid(ota_ov_bar))
-        lv_bar_set_value(ota_ov_bar, st->progress, LV_ANIM_ON);
-
-    if (ota_ov_btn && lv_obj_is_valid(ota_ov_btn) && ota_ov_btn_lbl) {
-        bool busy = (st->state == OTA_SCANNING_WIFI || st->state == OTA_CONNECTING_WIFI ||
-                     st->state == OTA_CHECKING_VERSION || st->state == OTA_DOWNLOADING_FW ||
-                     st->state == OTA_DOWNLOADING_SD || st->state == OTA_REBOOTING);
-        if (busy) {
-            lv_obj_add_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_clear_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);
-            if (st->state == OTA_UPDATE_AVAILABLE)
-                lv_label_set_text_fmt(ota_ov_btn_lbl, "Install v%s", st->available_version);
-            else
-                lv_label_set_text(ota_ov_btn_lbl, "Check Again");
-        }
-    }
-}
-
-void show_ota_update_overlay() {
-    if (ota_overlay) return; // already open
-
-    ota_overlay = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(ota_overlay, 466, 466);
-    lv_obj_center(ota_overlay);
-    lv_obj_set_style_bg_color(ota_overlay, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(ota_overlay, 255, 0);
-    lv_obj_set_style_border_width(ota_overlay, 0, 0);
-    lv_obj_clear_flag(ota_overlay, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Clean up timer + pointers whenever the overlay is destroyed (X or screen change)
-    lv_obj_add_event_cb(ota_overlay, [](lv_event_t * e) {
-        if (lv_event_get_code(e) != LV_EVENT_DELETE) return;
-        if (ota_ov_timer) { lv_timer_del(ota_ov_timer); ota_ov_timer = NULL; }
-        ota_overlay = NULL; ota_ov_status = NULL; ota_ov_bar = NULL;
-        ota_ov_btn = NULL; ota_ov_btn_lbl = NULL;
-    }, LV_EVENT_DELETE, NULL);
-
-    // Close (X) — small button, large invisible tap target so it's easy to hit
-    lv_obj_t * btn_x = lv_btn_create(ota_overlay);
-    lv_obj_set_size(btn_x, 56, 56);
-    lv_obj_set_style_radius(btn_x, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(btn_x, lv_color_hex(0x333333), 0);
-    lv_obj_align(btn_x, LV_ALIGN_TOP_MID, 0, 18);
-    lv_obj_set_ext_click_area(btn_x, 36);   // enlarge the tap target beyond the visible circle
-    lv_obj_t * lx = lv_label_create(btn_x);
-    lv_label_set_text(lx, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lx, &lv_font_montserrat_20, 0);
-    lv_obj_center(lx);
-    lv_obj_add_event_cb(btn_x, [](lv_event_t * e) {
-        lv_event_code_t c = lv_event_get_code(e);
-        if (c == LV_EVENT_CLICKED || c == LV_EVENT_RELEASED) ota_overlay_close();
-    }, LV_EVENT_ALL, NULL);
-
-    // Title
-    lv_obj_t * title = lv_label_create(ota_overlay);
-    lv_label_set_text(title, "SOFTWARE UPDATE");
-    lv_obj_set_style_text_font(title, &ui_font_rajdhani1, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 124);  // clear of the top close (X) button
-
-    // Status (centered, wraps)
-    ota_ov_status = lv_label_create(ota_overlay);
-    lv_label_set_long_mode(ota_ov_status, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ota_ov_status, 360);
-    lv_obj_set_style_text_align(ota_ov_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(ota_ov_status, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(ota_ov_status, lv_color_hex(0xCCCCCC), 0);
-    lv_label_set_text(ota_ov_status, "Starting update check...");
-    lv_obj_align(ota_ov_status, LV_ALIGN_CENTER, 0, -20);
-
-    // Progress bar
-    ota_ov_bar = lv_bar_create(ota_overlay);
-    lv_obj_set_size(ota_ov_bar, 320, 16);
-    lv_obj_align(ota_ov_bar, LV_ALIGN_CENTER, 0, 44);
-    lv_bar_set_range(ota_ov_bar, 0, 100);
-    lv_bar_set_value(ota_ov_bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(ota_ov_bar, lv_color_hex(0x222222), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(ota_ov_bar, lv_color_hex(0x999999), LV_PART_INDICATOR);
-    lv_obj_set_style_radius(ota_ov_bar, 8, LV_PART_MAIN);
-    lv_obj_set_style_radius(ota_ov_bar, 8, LV_PART_INDICATOR);
-
-    // Action button (Check Again / Install vX)
-    ota_ov_btn = lv_btn_create(ota_overlay);
-    lv_obj_set_size(ota_ov_btn, 300, 60);
-    lv_obj_align(ota_ov_btn, LV_ALIGN_CENTER, 0, 112);
-    lv_obj_set_style_bg_color(ota_ov_btn, lv_color_hex(0xFF6A00), 0);
-    lv_obj_set_style_radius(ota_ov_btn, 14, 0);
-    lv_obj_add_flag(ota_ov_btn, LV_OBJ_FLAG_HIDDEN);  // hidden until refresh decides (prevents start flash)
-    ota_ov_btn_lbl = lv_label_create(ota_ov_btn);
-    lv_label_set_text(ota_ov_btn_lbl, "Check Again");
-    lv_obj_set_style_text_font(ota_ov_btn_lbl, &ui_font_rajdhani1, 0);
-    lv_obj_center(ota_ov_btn_lbl);
-    lv_obj_add_event_cb(ota_ov_btn, [](lv_event_t * e) {
-        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-        const OTAStatus* st = ota_get_status();
-        if (st->state == OTA_UPDATE_AVAILABLE) ota_install();
-        else                                    ota_check_for_update();
-    }, LV_EVENT_ALL, NULL);
-
-    lv_obj_move_foreground(ota_overlay);
-    ota_ov_timer = lv_timer_create(ota_overlay_refresh, 400, NULL);
-
-    // Kick off the check immediately
-    ota_check_for_update();
-}
+// Shared with the simulator (sim/) — see ota_overlay_ui.h. Editing that file
+// changes what BOTH the device and the sim render; there's only one copy.
+#include "ota_overlay_ui.h"
 
 // ─── ABOUT SCREEN ────────────────────────────────────────────────────────────
 static lv_obj_t * about_screen = NULL;
@@ -2013,131 +1937,6 @@ extern "C" {
 
 // ─── GRID LAUNCHER ────────────────────────────────────────────────────────
 
-static void btn_event_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (ignore_until_lift) return;
-    int id = (int)(intptr_t)lv_event_get_user_data(e);
-    
-    switch (id) {
-        case 0: // SPEED
-            if (default_speedometer == 1) {
-                _ui_screen_change(&ui_godzillaspeedometer, LV_SCR_LOAD_ANIM_FADE_ON, 500, 0, &ui_godzillaspeedometer_screen_init);
-            } else {
-                _ui_screen_change(&ui_uispeedometer,  LV_SCR_LOAD_ANIM_FADE_ON, 500, 0, &ui_uispeedometer_screen_init);
-            }
-            break;
-        case 1: // GAUGES
-            _ui_screen_change(&ui_uigauge, LV_SCR_LOAD_ANIM_FADE_ON, 500, 0, &ui_uigauge_screen_init); 
-            break;
-        case 2: // INCLINE
-            _ui_screen_change(&ui_uiinclinometer, LV_SCR_LOAD_ANIM_FADE_ON, 500, 0, &ui_uiinclinometer_screen_init); 
-            break;
-        case 3: // IMAGE FRAME
-            app_imageframe(NULL); 
-            break;
-        case 4: // GAMES
-            build_rom_menu(); 
-            break;
-        case 5: // SYSTEM
-            build_settings_screen(); 
-            break;
-        case 6: // ABOUT
-            build_about_screen(); 
-            break;
-    }
-}
-
-void build_grid_launcher() {
-    if (grid_container != NULL) {
-        lv_obj_del(grid_container);
-        grid_container = NULL;
-    }
-
-    grid_container = lv_obj_create(ui_uilauncher);
-    lv_obj_set_size(grid_container, 390, 374); 
-    // Shifted grid container up by 20 more pixels (from 108 to 88)
-    lv_obj_set_pos(grid_container, 38, 88);
-    lv_obj_set_style_bg_opa(grid_container, 0, 0); // fully transparent wrapper
-    lv_obj_set_style_border_width(grid_container, 0, 0);
-    lv_obj_set_style_pad_left(grid_container, 0, 0);
-    lv_obj_set_style_pad_right(grid_container, 0, 0);
-    lv_obj_set_style_pad_top(grid_container, 40, 0); // Starts the scrollable content 40px below the container top
-    lv_obj_set_style_pad_bottom(grid_container, 0, 0);
-    lv_obj_set_style_pad_row(grid_container, 16, 0); // row gap
-    lv_obj_set_style_pad_column(grid_container, 14, 0); // column gap
-    
-    // Enable vertical scrolling
-    lv_obj_add_flag(grid_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(grid_container, LV_DIR_VER);
-    
-    // Align grid to the top-center (rows start vertically at top of container, items centered in row)
-    lv_obj_set_flex_flow(grid_container, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(grid_container, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-
-    // Keep scrolling functionality active but make the scrollbar fully invisible
-    lv_obj_set_scrollbar_mode(grid_container, LV_SCROLLBAR_MODE_OFF);
-
-    // 7 items following the exact original list sequence: Speed, Gauges, Incline, Image, Games, Settings, About
-    const lv_img_dsc_t* imgs[] = {&icon_speedo, &icon_gauges, &icon_incline, &icon_image, &icon_games, &icon_settings, &icon_about};
-    const char* labels[] = {"SPEEDO", "GAUGES", "INCLINE", "IMAGE", "GAMES", "SYSTEM", "ABOUT"};
-    const lv_color_t colors[] = {
-        lv_color_hex(0xFF0000), // Speedo (Red)
-        lv_color_hex(0x4ade80), // Gauges (Green)
-        lv_color_hex(0xFF0000), // Incline (Red)
-        lv_color_hex(0xa78bfa), // Image (Purple)
-        lv_color_hex(0xf87171), // Games (Red)
-        lv_color_hex(0x5a7060), // System (Gray-green)
-        lv_color_hex(0x38bdf8)  // About (Blue)
-    };
-
-    for (int i = 0; i < 7; i++) {
-        lv_obj_t * btn = lv_btn_create(grid_container);
-        lv_obj_set_size(btn, 112, 112); // Extra spacious 112x112 cells!
-        
-        // Brushed Steel Border Logic
-        bool is_center = (i == 1 || i == 4 || i == 6);
-        lv_color_t steel_color = is_center ? lv_color_hex(0xE0E0E0) : lv_color_hex(0x9A9A9A); // Brighter sides
-
-        // Base styling (Normal State)
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A1A1A), 0); // dark charcoal grey background ~80% black
-        lv_obj_set_style_bg_opa(btn, 255, 0); // fully opaque so no bleed-through
-        lv_obj_set_style_border_width(btn, 2, 0);
-        lv_obj_set_style_border_color(btn, steel_color, 0);
-        lv_obj_set_style_border_opa(btn, 200, 0); // strong metallic border
-        lv_obj_set_style_radius(btn, 20, 0);
-        lv_obj_set_style_shadow_width(btn, 0, 0);
-        
-        // Pressed State (Tactile visual feedback)
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x505050), LV_STATE_PRESSED); // Standardised grey shade
-        lv_obj_set_style_bg_opa(btn, 255, LV_STATE_PRESSED);
-        lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), LV_STATE_PRESSED); // flash white on press
-        lv_obj_set_style_border_opa(btn, 255, LV_STATE_PRESSED);
-        lv_obj_set_style_border_width(btn, 3, LV_STATE_PRESSED); // Thicker border
-        
-        // Disable scroll on buttons so swipe gestures scroll the parent grid container smoothly
-        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
-
-        lv_obj_t * img = lv_img_create(btn);
-        lv_img_set_src(img, imgs[i]);
-        lv_obj_align(img, LV_ALIGN_TOP_MID, 0, 10); // larger 48px icon moved closer to top
-        // Tint the icons with the steel theme
-        lv_obj_set_style_img_recolor(img, steel_color, 0);
-        lv_obj_set_style_img_recolor_opa(img, 255, 0);
-        lv_obj_set_style_img_recolor(img, lv_color_hex(0xFFFFFF), LV_STATE_PRESSED);
-        lv_obj_set_style_img_recolor_opa(img, 255, LV_STATE_PRESSED);
-
-        lv_obj_t * lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, labels[i]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0); // 14px size for perfect readability
-        lv_obj_set_style_text_color(lbl, steel_color, 0); // Text color matches steel box border
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), LV_STATE_PRESSED); // white highlight when clicked
-        // dropped text closer to very bottom, expanding internal cell gap to a spacious 34 pixels
-        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -6); 
-        
-        lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-    }
-    // Force grid to render above the black header patch (ui_Container2)
-    lv_obj_move_foreground(grid_container);
-    // Explicitly lock scroll position at the very top (0px) initially
-    lv_obj_scroll_to_y(grid_container, 0, LV_ANIM_OFF);
-}
+// Shared with the simulator (sim/) — see grid_launcher_ui.h. Editing that
+// file changes what BOTH the device and the sim render; there's only one copy.
+#include "grid_launcher_ui.h"

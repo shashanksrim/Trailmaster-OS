@@ -6,3 +6,14 @@ build/
 # Host unit-test compiled binary
 test/test_ota
 waveshare_esp32s3_1.43_amoled_lvgl8/test/test_ota
+
+# Local tooling (preview server configs, not project source)
+.claude/
+**/.claude/
+emulator/test/test_core
+emulator/test/test_l3
+emulator/build/*.o
+emulator/build/sketch_main.cpp
+emulator/build/trailmaster_emulator
+emulator/test/test_l3
+emulator/test/test_core

@@ -19,17 +19,31 @@ bool is_standard_animating = false;
 static void standard_anim_cb(void * var, int32_t v) {
     if (ui_rpmarc) {
         lv_arc_set_value(ui_rpmarc, v);
-        
-        // Color zones: Yellow (<3500), Electric Blue (<6500), Red (>=6500)
-        uint32_t color_hex = 0xFFD700;
-        if (v < 3500) {
-            color_hex = 0xFFD700;
-        } else if (v < 6500) {
-            color_hex = 0x00A0FF;
+
+        // Color zones: amber (<3000), hot (<6000), redline (>=6000) — matches
+        // the live-operation zones in screen_ui.h's get_rpm_gauge_color() and
+        // the redline sector/tick boundary in build_speedo_rpm_gauge() (both
+        // at 6000), so the boot-sweep animation previews the same colors
+        // real driving will show, instead of a different yellow/blue/red set.
+        uint32_t color_hex = 0xFFB020;
+        if (v < 3000) {
+            color_hex = 0xFFB020; // amber
+        } else if (v < 6000) {
+            color_hex = 0xFFC54D; // hot
         } else {
-            color_hex = 0xFF0000;
+            color_hex = 0xFF3B1D; // redline
         }
         lv_obj_set_style_arc_color(ui_rpmarc, lv_color_hex(color_hex), LV_PART_INDICATOR);
+
+        // Speed and rpm values both follow the same zone as the arc (matches
+        // the live update logic in screen_ui.h's update_screen_ui()) — only
+        // the unit captions stay fixed amber.
+        if (ui_speedlabel) {
+            lv_obj_set_style_text_color(ui_speedlabel, lv_color_hex(color_hex), LV_PART_MAIN);
+        }
+        if (ui_rpmlabel) {
+            lv_obj_set_style_text_color(ui_rpmlabel, lv_color_hex(color_hex), LV_PART_MAIN);
+        }
     }
     if (ui_rpmlabel) {
         lv_label_set_text_fmt(ui_rpmlabel, "%d", (int)v);
@@ -37,15 +51,6 @@ static void standard_anim_cb(void * var, int32_t v) {
     if (ui_speedlabel) {
         int32_t speed = (v * 140) / 8000;
         lv_label_set_text_fmt(ui_speedlabel, "%d", (int)speed);
-        
-        // White (0-39), Green (40-59), Red (60+)
-        if (speed < 40) {
-            lv_obj_set_style_text_color(ui_speedlabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-        } else if (speed < 60) {
-            lv_obj_set_style_text_color(ui_speedlabel, lv_color_hex(0x00FF00), LV_PART_MAIN);
-        } else {
-            lv_obj_set_style_text_color(ui_speedlabel, lv_color_hex(0xFF0000), LV_PART_MAIN);
-        }
     }
 }
 
@@ -100,14 +105,15 @@ ui_Image9 = lv_img_create(ui_uispeedometer);
 lv_img_set_src(ui_Image9, &ui_img_1093738210);
 lv_obj_set_width( ui_Image9, LV_SIZE_CONTENT);  /// 1
 lv_obj_set_height( ui_Image9, LV_SIZE_CONTENT);   /// 1
-lv_obj_set_x( ui_Image9, -56 );
-lv_obj_set_y( ui_Image9, -63 );
+lv_obj_set_x( ui_Image9, 0 );
+lv_obj_set_y( ui_Image9, 0 );
 lv_obj_set_align( ui_Image9, LV_ALIGN_CENTER );
 lv_obj_clear_flag( ui_Image9, LV_OBJ_FLAG_CLICKABLE );   /// Flags
 lv_obj_clear_flag( ui_Image9, LV_OBJ_FLAG_SCROLLABLE );    /// Flags
-lv_img_set_zoom(ui_Image9,800);
-lv_obj_set_style_img_recolor(ui_Image9, lv_color_hex(0x000000), LV_PART_MAIN| LV_STATE_DEFAULT);
-lv_obj_set_style_img_recolor_opa(ui_Image9, 70, LV_PART_MAIN| LV_STATE_DEFAULT);
+// ui_img_1093738210 is now native 466x466 (was a 200x199 stock texture
+// needing 800/256x zoom + heavy black recolor to fill the screen and tone
+// it down) — no zoom/recolor needed, the new artwork is already screen-fit
+// and dark on its own.
 
 ui_rpmlabel = lv_label_create(ui_uispeedometer);
 lv_obj_set_width( ui_rpmlabel, LV_SIZE_CONTENT);  /// 1
@@ -116,7 +122,7 @@ lv_obj_set_x( ui_rpmlabel, -37 );
 lv_obj_set_y( ui_rpmlabel, 179 );
 lv_obj_set_align( ui_rpmlabel, LV_ALIGN_CENTER );
 lv_label_set_text(ui_rpmlabel,"3500");
-lv_obj_set_style_text_color(ui_rpmlabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT );
+lv_obj_set_style_text_color(ui_rpmlabel, lv_color_hex(0xFFB020), LV_PART_MAIN | LV_STATE_DEFAULT );
 lv_obj_set_style_text_opa(ui_rpmlabel, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
 lv_obj_set_style_text_font(ui_rpmlabel, &lv_font_montserrat_48, LV_PART_MAIN| LV_STATE_DEFAULT);
 
@@ -127,7 +133,7 @@ lv_obj_set_x( ui_speedlabel, 0 );
 lv_obj_set_y( ui_speedlabel, 4 );
 lv_obj_set_align( ui_speedlabel, LV_ALIGN_CENTER );
 lv_label_set_text(ui_speedlabel,"65");
-lv_obj_set_style_text_color(ui_speedlabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT );
+lv_obj_set_style_text_color(ui_speedlabel, lv_color_hex(0xFFB020), LV_PART_MAIN | LV_STATE_DEFAULT );
 lv_obj_set_style_text_opa(ui_speedlabel, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
 lv_obj_set_style_text_font(ui_speedlabel, &ui_font_rajdhani200, LV_PART_MAIN| LV_STATE_DEFAULT);
 
@@ -139,7 +145,7 @@ lv_obj_add_flag( ui_rpmarc, LV_OBJ_FLAG_HIDDEN );   /// Flags
 lv_arc_set_range(ui_rpmarc, 0,8000);
 lv_arc_set_value(ui_rpmarc, 3500);
 
-lv_obj_set_style_arc_color(ui_rpmarc, lv_color_hex(0xFF0000), LV_PART_INDICATOR | LV_STATE_DEFAULT );
+lv_obj_set_style_arc_color(ui_rpmarc, lv_color_hex(0xFFB020), LV_PART_INDICATOR | LV_STATE_DEFAULT );
 lv_obj_set_style_arc_opa(ui_rpmarc, 255, LV_PART_INDICATOR| LV_STATE_DEFAULT);
 lv_obj_set_style_arc_width(ui_rpmarc, 14, LV_PART_INDICATOR | LV_STATE_DEFAULT); // make arc slightly thicker
 
@@ -179,7 +185,7 @@ lv_obj_set_x( ui_visrpm, 68 );
 lv_obj_set_y( ui_visrpm, 180 );
 lv_obj_set_align( ui_visrpm, LV_ALIGN_CENTER );
 lv_label_set_text(ui_visrpm,"rpm");
-lv_obj_set_style_text_color(ui_visrpm, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT );
+lv_obj_set_style_text_color(ui_visrpm, lv_color_hex(0xFFB020), LV_PART_MAIN | LV_STATE_DEFAULT );
 lv_obj_set_style_text_opa(ui_visrpm, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
 lv_obj_set_style_text_font(ui_visrpm, &lv_font_montserrat_34, LV_PART_MAIN| LV_STATE_DEFAULT);
 
