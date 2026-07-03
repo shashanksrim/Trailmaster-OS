@@ -34,10 +34,7 @@ lv_obj_set_y( ui_Image2, 0 );
 lv_obj_set_align( ui_Image2, LV_ALIGN_CENTER );
 lv_obj_add_flag( ui_Image2, LV_OBJ_FLAG_CLICKABLE );   /// Flags
 lv_obj_clear_flag( ui_Image2, LV_OBJ_FLAG_SCROLLABLE );    /// Flags
-// ui_img_1093738210 is now native 466x466 (was a 200x199 stock texture
-// needing 800/256x zoom + heavy black recolor to fill the screen and tone
-// it down) — no zoom/recolor needed, the new artwork is already screen-fit
-// and dark on its own.
+lv_obj_set_style_img_opa(ui_Image2, 225, 0); // ~12% subdued, same as speedometer
 
 ui_Image3 = lv_img_create(ui_uigauge);
 lv_img_set_src(ui_Image3, &ui_img_1814113988);
@@ -59,8 +56,11 @@ lv_obj_set_align( ui_oiltemp, LV_ALIGN_CENTER );
 lv_arc_set_value(ui_oiltemp, 67);
 lv_arc_set_bg_angles(ui_oiltemp,120,230);
 lv_obj_set_style_arc_width(ui_oiltemp, 8, LV_PART_MAIN| LV_STATE_DEFAULT);
+lv_obj_set_style_arc_color(ui_oiltemp, lv_color_hex(0x333333), LV_PART_MAIN| LV_STATE_DEFAULT);
+lv_obj_set_style_arc_opa(ui_oiltemp, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
 
 lv_obj_set_style_arc_width(ui_oiltemp, 8, LV_PART_INDICATOR| LV_STATE_DEFAULT);
+lv_obj_set_style_arc_color(ui_oiltemp, lv_color_hex(0xFFB020), LV_PART_INDICATOR| LV_STATE_DEFAULT);
 
 lv_obj_set_style_bg_color(ui_oiltemp, lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_DEFAULT );
 lv_obj_set_style_bg_opa(ui_oiltemp, 0, LV_PART_KNOB| LV_STATE_DEFAULT);
@@ -85,8 +85,11 @@ lv_arc_set_value(ui_Engine_temp, 53);
 lv_arc_set_bg_angles(ui_Engine_temp,310,60);
 lv_arc_set_mode(ui_Engine_temp, LV_ARC_MODE_REVERSE);
 lv_obj_set_style_arc_width(ui_Engine_temp, 8, LV_PART_MAIN| LV_STATE_DEFAULT);
+lv_obj_set_style_arc_color(ui_Engine_temp, lv_color_hex(0x333333), LV_PART_MAIN| LV_STATE_DEFAULT);
+lv_obj_set_style_arc_opa(ui_Engine_temp, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
 
 lv_obj_set_style_arc_width(ui_Engine_temp, 8, LV_PART_INDICATOR| LV_STATE_DEFAULT);
+lv_obj_set_style_arc_color(ui_Engine_temp, lv_color_hex(0xFFB020), LV_PART_INDICATOR| LV_STATE_DEFAULT);
 
 lv_obj_set_style_bg_color(ui_Engine_temp, lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_DEFAULT );
 lv_obj_set_style_bg_opa(ui_Engine_temp, 0, LV_PART_KNOB| LV_STATE_DEFAULT);
