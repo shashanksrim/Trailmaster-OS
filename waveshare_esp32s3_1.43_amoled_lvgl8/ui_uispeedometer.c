@@ -110,10 +110,11 @@ lv_obj_set_y( ui_Image9, 0 );
 lv_obj_set_align( ui_Image9, LV_ALIGN_CENTER );
 lv_obj_clear_flag( ui_Image9, LV_OBJ_FLAG_CLICKABLE );   /// Flags
 lv_obj_clear_flag( ui_Image9, LV_OBJ_FLAG_SCROLLABLE );    /// Flags
-// ui_img_1093738210 is now native 466x466 (was a 200x199 stock texture
-// needing 800/256x zoom + heavy black recolor to fill the screen and tone
-// it down) — no zoom/recolor needed, the new artwork is already screen-fit
-// and dark on its own.
+// Subdue background ~12% so dial/label elements aren't lost against it.
+// img_opa=225/255≈88% lets the solid black screen bg show through slightly,
+// darkening the composite without tinting the contour-map colours the way
+// the old black-recolor trick did.
+lv_obj_set_style_img_opa(ui_Image9, 225, 0);
 
 ui_rpmlabel = lv_label_create(ui_uispeedometer);
 lv_obj_set_width( ui_rpmlabel, LV_SIZE_CONTENT);  /// 1

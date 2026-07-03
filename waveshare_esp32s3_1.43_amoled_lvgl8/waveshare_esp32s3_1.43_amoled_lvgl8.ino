@@ -317,7 +317,7 @@ static void make_settings_section_header(lv_obj_t * parent, const char * text) {
     lv_label_set_text(h, text);
     lv_obj_set_width(h, 430);
     lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_pad_left(h, 4, 0);
+    lv_obj_set_style_pad_left(h, 70, 0); // offset from round-screen left curvature
     lv_obj_set_style_text_font(h, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(h, lv_color_hex(0xFF9500), 0);
     lv_obj_set_style_pad_top(h, 6, 0);
@@ -368,12 +368,14 @@ void build_settings_screen() {
     lv_obj_set_style_pad_all(scroll_cont, 0, 0);
     lv_obj_set_style_pad_row(scroll_cont, 0, 0);
     lv_obj_add_flag(scroll_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(scroll_cont, LV_OBJ_FLAG_SCROLL_MOMENTUM);  // no coast animation after lift
+    lv_obj_clear_flag(scroll_cont, LV_OBJ_FLAG_SCROLL_ELASTIC);   // no rubber-band overscroll
     lv_obj_set_scroll_dir(scroll_cont, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(scroll_cont, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_flex_flow(scroll_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(scroll_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_top(scroll_cont, 8, 0);
-    lv_obj_set_style_pad_bottom(scroll_cont, 20, 0);
+    lv_obj_set_style_pad_bottom(scroll_cont, 60, 0); // extra clearance for round-screen bottom curve
     lv_obj_set_style_pad_gap(scroll_cont, 10, 0);
 
     // Use scroll_cont as parent for all rows
@@ -393,7 +395,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_bright = lv_label_create(row1);
     lv_label_set_text(lbl_bright, "Brightness");
-    lv_obj_set_style_text_font(lbl_bright, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_bright, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_bright, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_bright, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -416,7 +418,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_minus, 25, 0);
     lv_obj_t * lbl_minus = lv_label_create(btn_minus);
     lv_label_set_text(lbl_minus, "-");
-    lv_obj_set_style_text_font(lbl_minus, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_minus, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_minus);
 
     // value label
@@ -432,7 +434,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_plus, 25, 0);
     lv_obj_t * lbl_plus = lv_label_create(btn_plus);
     lv_label_set_text(lbl_plus, "+");
-    lv_obj_set_style_text_font(lbl_plus, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_plus, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_plus);
 
     // Wire callbacks
@@ -461,7 +463,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_wifi_s = lv_label_create(row_wifi);
     lv_label_set_text(lbl_wifi_s, "Wifi settings");
-    lv_obj_set_style_text_font(lbl_wifi_s, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_wifi_s, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_wifi_s, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_wifi_s, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -488,7 +490,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_logo = lv_label_create(row_logo);
     lv_label_set_text(lbl_logo, "Jimny mode");
-    lv_obj_set_style_text_font(lbl_logo, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_logo, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_logo, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_logo, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -537,7 +539,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_grid = lv_label_create(row_grid);
     lv_label_set_text(lbl_grid, "Grid Launcher");
-    lv_obj_set_style_text_font(lbl_grid, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_grid, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_grid, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_grid, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -591,7 +593,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_boot = lv_label_create(row2);
     lv_label_set_text(lbl_boot, "Boot image");
-    lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_boot, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_boot, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_boot, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -651,7 +653,7 @@ void build_settings_screen() {
 
     lv_obj_t * lbl_boot_time = lv_label_create(row3);
     lv_label_set_text(lbl_boot_time, "Boot duration");
-    lv_obj_set_style_text_font(lbl_boot_time, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_boot_time, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_boot_time, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_boot_time, LV_ALIGN_LEFT_MID, 14, 0);
 
@@ -677,7 +679,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_time_minus, 25, 0);
     lv_obj_t * lbl_time_minus = lv_label_create(btn_time_minus);
     lv_label_set_text(lbl_time_minus, "-");
-    lv_obj_set_style_text_font(lbl_time_minus, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_time_minus, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_time_minus);
 
     // value label
@@ -693,7 +695,7 @@ void build_settings_screen() {
     lv_obj_set_style_radius(btn_time_plus, 25, 0);
     lv_obj_t * lbl_time_plus = lv_label_create(btn_time_plus);
     lv_label_set_text(lbl_time_plus, "+");
-    lv_obj_set_style_text_font(lbl_time_plus, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_time_plus, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_time_plus);
 
     // Wire callbacks
@@ -1473,8 +1475,11 @@ void my_touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
         
         if (!p_state) { touch_start_y = y; p_state = true; }
         
-        // SWIPE DOWN TO LAUNCHER (from any screen except launcher itself)
-        if (lv_scr_act() != ui_uilauncher && (y - touch_start_y > 100)) {
+        // SWIPE DOWN TO LAUNCHER — only when swipe STARTS in the top ~80px
+        // (above where any scroll container sits). Without this guard the
+        // downward-scroll gesture in Settings / any scrollable list also
+        // triggers launcher navigation mid-list.
+        if (lv_scr_act() != ui_uilauncher && touch_start_y < 80 && (y - touch_start_y > 100)) {
             if (currentMode == MODE_GAME) {
                 // Return to ROM Menu from Dino Game
                 stop_all_games();
@@ -1497,16 +1502,11 @@ void my_touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
             }
         }
         
-        // SWIPE UP TO TAKE SCREENSHOT
-        if (touch_start_y - y > 100) {
-            take_screenshot();
-            p_state = false; 
-            ignore_until_lift = true;
-            data->point.x = x; 
-            data->point.y = y;
-            data->state = LV_INDEV_STATE_REL; 
-            return;
-        }
+        // SWIPE UP: screenshot gesture removed — lv_snapshot_take() blocks
+        // 200-500ms (allocates ~434KB + full off-screen render) and was
+        // firing on the first swipe of any gesture, causing the noticeable
+        // lag on Settings scroll and launcher navigation. Re-bind to a
+        // hardware button if you want this feature back.
         
         // Swipe up to exit launcher functionality removed per user request
         data->point.x = x; data->point.y = y; data->state = LV_INDEV_STATE_PR; 
