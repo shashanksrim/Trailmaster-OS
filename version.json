@@ -1,6 +1,6 @@
 {
-  "version": "3.9",
-  "changelog": "v3.9: Settings redesign with section groups, amber dial colors, new contour map background, WiFi overlay improvements, speedometer settings menu",
+  "version": "3.10",
+  "changelog": "v3.10: Settings UX polish, gauge arc colors, lag fix (screenshot gesture), swipe-to-launcher guard, subdued background",
   "firmware_url": "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/firmware.bin",
   "sd_files": []
 }
