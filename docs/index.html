@@ -154,15 +154,16 @@
         <button class="btn btn-sm btn-ghost" onclick="showEject()" style="flex:1">
           ⏏ Eject
         </button>
+        <button class="btn btn-sm btn-outline" onclick="downloadRenameScript()" style="flex:1"
+          id="rename-btn" title="Downloads a one-click script that sets the card name to TRAILMSTR">
+          ✏️ Rename to TRAILMSTR
+        </button>
         <button class="btn btn-sm btn-orange" onclick="pickAndFlashSD()" style="flex:1">
           ↺ Re-flash
         </button>
       </div>
-
-      <div class="rename-row">
-        <input id="new-name-input" type="text" placeholder="New card name…" maxlength="11" />
-        <button class="btn btn-sm btn-outline" onclick="showRename()">✏️ Rename</button>
-      </div>
+      <div id="rename-hint" style="display:none;color:#8fda8f;font-size:12.5px;
+        margin-top:10px;text-align:center;line-height:1.5;"></div>
     </div>
 
     <div class="steps" style="margin-top:18px;">
@@ -351,33 +352,52 @@
       openModal("⏏ Eject SD card", cmd, note);
     }
 
-    // ── Rename ───────────────────────────────────────────────────────────
-    function showRename() {
+    // ── Rename to preset label (auto download — no user config needed) ──
+    // FAT32/exFAT volume labels: max 11 chars, uppercase.
+    const SD_LABEL = "TRAILMSTR";
+
+    function downloadRenameScript() {
       if (!dirHandle) return;
-      const oldName = dirHandle.name;
-      const newName = document.getElementById("new-name-input").value.trim();
-      if (!newName) {
-        document.getElementById("new-name-input").focus();
-        return;
-      }
-      // FAT32/exFAT labels: 11 chars max, uppercase recommended
-      let cmd, note;
+      const vol = dirHandle.name;
+      const hint = document.getElementById("rename-hint");
+
       if (isMac) {
-        cmd  = `diskutil rename "/Volumes/${oldName}" "${newName}"`;
-        note = `Run this in Terminal (⌘ Space → "Terminal" → paste → Enter).<br>
-                FAT32 labels are limited to 11 characters and are stored in uppercase —
-                the name will appear correctly after the card is re-inserted.`;
+        // .terminal files open in Terminal.app on double-click without needing chmod +x.
+        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CommandString</key>
+  <string>diskutil rename "/Volumes/${vol}" "${SD_LABEL}" &amp;&amp; echo "✓ SD card renamed to ${SD_LABEL}" &amp;&amp; sleep 3 &amp;&amp; exit</string>
+  <key>ProfileCurrentVersion</key>
+  <real>2.06</real>
+  <key>RunCommandAsShell</key>
+  <false/>
+  <key>name</key>
+  <string>Rename SD Card to ${SD_LABEL}</string>
+</dict>
+</plist>`;
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([plist], { type: "application/xml" }));
+        a.download = "rename-sd.terminal";
+        a.click();
+        hint.style.display = "block";
+        hint.innerHTML = `✓ <b>rename-sd.terminal</b> downloaded — double-click it to rename your card to <b>${SD_LABEL}</b>.`;
       } else if (isWin) {
-        // Windows needs the drive letter — we don't have it from the API
-        cmd  = `label X: "${newName.substring(0,11).toUpperCase()}"`;
-        note = `Replace <b>X</b> with the actual drive letter of your SD card
-                (visible in File Explorer, e.g. D:, E:, F:).<br>
-                FAT32 labels are limited to 11 characters.`;
+        // We don't know the drive letter from the API so fall back to the modal with a command to copy.
+        openModal(
+          `✏️ Rename to ${SD_LABEL}`,
+          `label X: ${SD_LABEL}`,
+          `Replace <b>X</b> with your SD card's drive letter (visible in File Explorer, e.g. D:, E:).<br>
+           Run in <b>Command Prompt</b> (Win + R → cmd → Enter → paste → Enter).`
+        );
       } else {
-        cmd  = `sudo fatlabel /dev/sdX1 "${newName.substring(0,11).toUpperCase()}"`;
-        note = `Replace <b>/dev/sdX1</b> with your SD card's actual device partition.`;
+        openModal(
+          `✏️ Rename to ${SD_LABEL}`,
+          `sudo fatlabel /dev/sdX1 ${SD_LABEL}`,
+          `Replace <b>/dev/sdX1</b> with your SD card's actual device partition.`
+        );
       }
-      openModal(`✏️ Rename to "${newName}"`, cmd, note);
     }
   </script>
 </body>
