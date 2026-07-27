@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Trailmaster Convoy</title>
+  <meta name="theme-color" content="#0d0d0d" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./radar.svg" />
+  <link rel="apple-touch-icon" href="./radar.svg" />
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    :root { --orange:#FF6A00; --bg:#0d0d0d; --card:#1a1a1a; --line:#2a2a2a;
+            --text:#f5f5f5; --muted:#888; }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html, body { margin:0; height:100%; }
+    body { background:var(--bg); color:var(--text);
+      font-family:'Segoe UI',-apple-system,Roboto,Helvetica,Arial,sans-serif; }
+    .hidden { display:none !important; }
+
+    /* ── Join screen ─────────────────────────────────────────── */
+    .screen { height:100dvh; }
+    #join { display:flex; flex-direction:column; align-items:center; padding:24px;
+      overflow:auto; }
+    .brand { text-align:center; margin:32px 0 8px; }
+    .brand h1 { margin:0; font-size:26px; letter-spacing:3px; text-transform:uppercase; }
+    .brand h1 span { color:var(--orange); }
+    .brand p { color:var(--muted); margin:6px 0 0; font-size:13px; letter-spacing:1px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:16px;
+      padding:24px; max-width:420px; width:100%; margin-top:28px;
+      box-shadow:0 8px 24px rgba(0,0,0,.5); }
+    label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:1px;
+      color:var(--muted); margin:16px 0 6px; }
+    input { width:100%; padding:13px 14px; border-radius:10px; border:1px solid var(--line);
+      background:#0f0f0f; color:var(--text); font-size:16px; font-family:inherit; outline:none; }
+    input:focus { border-color:var(--orange); }
+    #f-code { text-transform:uppercase; letter-spacing:2px; font-weight:700; }
+    .btn { display:block; width:100%; padding:15px; border-radius:12px; font-size:15px;
+      font-weight:700; text-transform:uppercase; letter-spacing:1px; cursor:pointer;
+      border:none; font-family:inherit; margin-top:18px; transition:opacity .15s; }
+    .btn:active { opacity:.8; }
+    .btn-orange { background:var(--orange); color:#fff; }
+    .btn-outline { background:transparent; color:var(--orange); border:2px solid var(--orange); }
+    .err { color:#ff6b6b; font-size:13px; margin-top:14px; min-height:16px; text-align:center; }
+    .hint { color:var(--muted); font-size:12px; line-height:1.6; margin-top:16px; text-align:center; }
+    footer { color:#555; font-size:11px; margin:24px 0; text-align:center; }
+
+    /* ── Map screen ──────────────────────────────────────────── */
+    #app { position:relative; }
+    #map { position:absolute; inset:0; background:#0a0a0a; }
+    .topbar { position:absolute; top:0; left:0; right:0; z-index:600;
+      display:flex; align-items:center; gap:10px; padding:calc(env(safe-area-inset-top) + 10px) 12px 10px;
+      background:linear-gradient(#0d0d0dcc, #0d0d0d00); }
+    .chip { background:#000000aa; border:1px solid var(--orange); color:var(--orange);
+      font-weight:700; letter-spacing:2px; padding:7px 12px; border-radius:20px; font-size:14px; }
+    .count { color:var(--text); font-size:13px; background:#000000aa; padding:7px 12px;
+      border-radius:20px; border:1px solid var(--line); }
+    .spacer { flex:1; }
+    .leave { background:#000000aa; border:1px solid var(--line); color:var(--muted);
+      padding:7px 12px; border-radius:20px; font-size:13px; cursor:pointer; font-family:inherit; }
+    .fab { position:absolute; right:14px; bottom:calc(env(safe-area-inset-bottom) + 190px); z-index:600;
+      width:44px; height:44px; border-radius:50%; background:var(--orange); color:#fff;
+      border:none; font-size:20px; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,.5); }
+    .sheet { position:absolute; left:0; right:0; bottom:0; z-index:600;
+      background:#141414ee; border-top:1px solid var(--line);
+      border-radius:18px 18px 0 0; padding:12px 14px calc(env(safe-area-inset-bottom) + 14px);
+      max-height:44dvh; overflow:auto; backdrop-filter:blur(6px); }
+    .sheet h2 { margin:2px 0 10px; font-size:11px; letter-spacing:2px; text-transform:uppercase;
+      color:var(--muted); }
+    .rrow { display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid #ffffff0f; }
+    .rrow.off { opacity:.4; }
+    .rdot { width:11px; height:11px; border-radius:50%; flex:none; }
+    .rcall { font-weight:700; letter-spacing:1px; min-width:52px; }
+    .rname { color:var(--text); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .rsub { color:var(--muted); font-size:13px; flex:none; }
+
+    /* ── Leaflet marker (dot + callsign tag) ─────────────────── */
+    .cv-marker { position:relative; }
+    .cv-dot { width:16px; height:16px; border-radius:50%; border:2px solid #000;
+      transform:translate(-8px,-8px); }
+    .cv-tag { position:absolute; left:10px; top:-22px; transform:translateX(-50%);
+      font-weight:700; font-size:13px; letter-spacing:1px; white-space:nowrap;
+      text-shadow:0 1px 3px #000, 0 0 4px #000; }
+
+    /* ── Setup overlay ───────────────────────────────────────── */
+    .overlay { position:fixed; inset:0; z-index:1000; background:var(--bg); overflow:auto;
+      padding:32px 20px; }
+    .overlay .card { margin:24px auto; }
+    .overlay code { background:#000; padding:2px 6px; border-radius:5px; color:#9cf; word-break:break-all; }
+    .overlay ol { line-height:1.9; padding-left:20px; }
+    .overlay pre { background:#000; border:1px solid var(--line); border-radius:8px;
+      padding:12px; overflow:auto; font-size:12px; color:#9cf; }
+  </style>
+</head>
+<body>
+
+  <!-- Setup overlay: shown until config.js has real Firebase values -->
+  <div id="setup" class="overlay hidden">
+    <div class="brand"><h1>TRAIL<span>MASTER</span> CONVOY</h1><p>Setup needed</p></div>
+    <div class="card">
+      <p>This app needs a free Firebase project to relay convoy positions.</p>
+      <ol>
+        <li>Open <code>docs/convoy/config.js</code>.</li>
+        <li>Create a project at <b>console.firebase.google.com</b>, add a Realtime Database + a Web app.</li>
+        <li>Paste the <code>firebaseConfig</code> values into that file and reload.</li>
+      </ol>
+      <p style="color:var(--muted);font-size:13px">Full steps + the security rules to paste are in <code>docs/convoy/README.md</code>.</p>
+      <p style="text-align:center;margin-top:18px"><a id="setup-demo" href="#" style="color:var(--orange)">Preview a demo map (no setup) →</a></p>
+    </div>
+  </div>
+
+  <!-- Join screen -->
+  <section id="join" class="screen">
+    <div class="brand">
+      <h1>TRAIL<span>MASTER</span> CONVOY</h1>
+      <p>SEE YOUR CONVOY · LIVE</p>
+    </div>
+    <div class="card">
+      <label for="f-name">Your name</label>
+      <input id="f-name" type="text" placeholder="Shashank" autocomplete="name" />
+      <label for="f-callsign">Callsign (≤5 chars)</label>
+      <input id="f-callsign" type="text" placeholder="TM1" maxlength="5" />
+      <label for="f-code">Convoy code</label>
+      <input id="f-code" type="text" placeholder="TM-XXXX" autocapitalize="characters" />
+      <button id="btn-join" class="btn btn-orange">Join convoy</button>
+      <button id="btn-create" class="btn btn-outline">Create new convoy</button>
+      <button id="btn-demo" class="btn" style="background:transparent;color:var(--muted);border:1px solid var(--line)">Try a demo (no setup)</button>
+      <div id="f-err" class="err"></div>
+      <div class="hint">Share the code with your convoy. Everyone who enters it
+        sees each other on the map. Your location is shared only while this page
+        is open.</div>
+    </div>
+    <footer>Trailmaster-OS · network convoy</footer>
+  </section>
+
+  <!-- Map screen -->
+  <section id="app" class="screen hidden">
+    <div id="map"></div>
+    <div class="topbar">
+      <span class="chip" id="code-chip">—</span>
+      <span class="count" id="count">0 cars</span>
+      <span class="spacer"></span>
+      <button class="leave" id="btn-leave">Leave</button>
+    </div>
+    <button class="fab" id="btn-recenter" title="Recenter">◎</button>
+    <div class="sheet">
+      <h2>Convoy</h2>
+      <div id="roster"></div>
+    </div>
+  </section>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
