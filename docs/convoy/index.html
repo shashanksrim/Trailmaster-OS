@@ -78,6 +78,7 @@
       display:flex; align-items:center; justify-content:center; padding:0; }
     .fab svg { width:22px; height:22px; }
     .fab.primary { border-color:var(--orange); color:var(--orange); }
+    .fab.linked { border-color:#00E5FF; color:#00E5FF; }   /* board connected */
 
     .sheet { position:absolute; left:0; right:0; bottom:0; z-index:600;
       background:#141414f2; border-top:1px solid var(--line);
@@ -166,6 +167,10 @@
       <button class="leave" id="btn-leave">Leave</button>
     </div>
     <div class="fabs" id="fabs">
+      <button class="fab" id="btn-link" title="Connect Trailmaster">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 7.5 17 16.5 12 21V3l5 4.5L7 16.5"/></svg>
+      </button>
       <button class="fab primary" id="btn-view" title="Switch view">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/>

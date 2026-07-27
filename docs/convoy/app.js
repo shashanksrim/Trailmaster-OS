@@ -15,6 +15,11 @@ import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS } fro
 const HUES = ["#00E5FF", "#00E676", "#FFD54F", "#FF4081", "#B388FF", "#FF8A65"];
 const SELF_COLOR = "#FF6A00";                    // Trailmaster orange = "me"
 
+// Phase 1 — BLE relay to the Trailmaster board (peripheral). Keep these UUIDs in
+// sync with convoy_net.h on the firmware side.
+const CONVOY_NET_SVC = "54524149-4d53-5452-0001-000000000001";
+const CONVOY_NET_CHR = "54524149-4d53-5452-0001-000000000002";
+
 const $ = (id) => document.getElementById(id);
 
 // ── Identity (persisted) ──────────────────────────────────────────────────────
@@ -72,6 +77,7 @@ let view = "map", sheetExpanded = false, lastRowCount = 0;
 let radarCv = null, radarCtx = null, radarW = 0, radarH = 0;
 let radarRAF = null, radarLastDraw = 0, radarNorthUp = false;
 let radarHdg = 0, radarHdgValid = false;
+let boardDev = null, boardChar = null, boardTimer = null;   // BLE relay to board
 
 const now = () => Date.now() + serverOffset;
 const isConfigured = () => firebaseConfig.apiKey && firebaseConfig.apiKey !== "PASTE_ME";
@@ -96,6 +102,9 @@ function boot() {
   $("sheet-grab").addEventListener("click", toggleSheet);
   $("sheet-head").addEventListener("click", toggleSheet);
   window.addEventListener("resize", () => { if (view === "radar") sizeRadar(); });
+  // BLE relay button only where Web Bluetooth exists (Chrome/Android, not iOS Safari).
+  if (navigator.bluetooth) $("btn-link").addEventListener("click", connectBoard);
+  else $("btn-link").classList.add("hidden");
 
   if (new URLSearchParams(location.search).has("demo")) { startDemo(); return; }
 
@@ -194,6 +203,9 @@ function leave() {
   if (myRef) { remove(myRef); }
   for (const k in markers) { map.removeLayer(markers[k]); }
   markers = {}; members = {}; fitted = false;
+  if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
+  if (boardDev && boardDev.gatt && boardDev.gatt.connected) boardDev.gatt.disconnect();
+  boardChar = null; setBoardBtn(false);
   stopRadar();
   if (view !== "map") switchView("map");
   sheetExpanded = false;
@@ -476,6 +488,61 @@ function updateSheetMore() {
   const el = $("sheet-more"); if (!el) return;
   if (sheetExpanded) { el.textContent = "tap to collapse"; return; }
   el.textContent = lastRowCount > 2 ? `+${lastRowCount - 2} more · tap` : "";
+}
+
+// ── Phase 1: relay the roster to the Trailmaster board over BLE ───────────────
+// Encodes the room to the compact wire format convoy_net.h parses. The connected
+// phone is the board's own car, so its own member becomes the "S" (self) line.
+function encodeRoster() {
+  const t = now();
+  const self = members[me.id];
+  const lines = [];
+  if (self && self.lat != null) {
+    lines.push(`S,${self.lat.toFixed(6)},${self.lon.toFixed(6)},` +
+      `${self.heading != null ? Math.round(self.heading) : -1},` +
+      `${self.speed != null ? self.speed.toFixed(1) : 0},1`);
+  } else {
+    lines.push("S,0,0,-1,0,0");
+  }
+  for (const [id, m] of Object.entries(members)) {
+    if (id === me.id || m.lat == null) continue;
+    if (t - (m.ts || 0) > STALE_DROP_MS) continue;
+    const online = t - (m.ts || 0) < ONLINE_WINDOW_MS ? 1 : 0;
+    const cs = (m.callsign || "?").slice(0, 5).replace(/,/g, "");
+    lines.push(`C,${cs},${m.lat.toFixed(6)},${m.lon.toFixed(6)},${online}`);
+  }
+  return lines.join("\n");
+}
+async function pushBoard() {
+  if (!boardChar) return;
+  const data = new TextEncoder().encode(encodeRoster());
+  try {
+    if (boardChar.writeValueWithoutResponse) await boardChar.writeValueWithoutResponse(data);
+    else await boardChar.writeValue(data);
+  } catch (e) { /* transient BLE error — next tick retries */ }
+}
+async function connectBoard() {
+  if (!navigator.bluetooth) return;
+  try {
+    const dev = await navigator.bluetooth.requestDevice({ filters: [{ services: [CONVOY_NET_SVC] }] });
+    dev.addEventListener("gattserverdisconnected", onBoardDisconnect);
+    const gatt = await dev.gatt.connect();
+    const svc = await gatt.getPrimaryService(CONVOY_NET_SVC);
+    boardChar = await svc.getCharacteristic(CONVOY_NET_CHR);
+    boardDev = dev;
+    setBoardBtn(true);
+    pushBoard();                                  // push immediately
+    boardTimer = setInterval(pushBoard, 1200);    // then ~1/s
+  } catch (e) { console.warn("Bluetooth:", e.message || e); }
+}
+function onBoardDisconnect() {
+  if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
+  boardChar = null; setBoardBtn(false);
+}
+function setBoardBtn(on) {
+  const b = $("btn-link"); if (!b) return;
+  b.classList.toggle("linked", on);
+  b.title = on ? "Trailmaster connected" : "Connect Trailmaster";
 }
 
 // ── UI helpers ────────────────────────────────────────────────────────────────

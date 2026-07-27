@@ -76,6 +76,24 @@ push and it's live at the URL above. Share that link with the convoy.
 
 ---
 
+## Phase 1 — relay onto the Trailmaster screen (BLE)
+
+The board runs as a BLE **peripheral** (`convoy_net.h`, firmware); the phone (this
+app, Chrome/Android) connects over **Web Bluetooth** and pushes the roster so the
+convoy appears on the device's own radar. The connected phone is the board's own
+car. Web Bluetooth needs a secure context — use the deployed HTTPS URL (not
+`file://`).
+
+- Tap the **Bluetooth button** (top of the FAB stack) → pick "Trailmaster" → the
+  button turns cyan when connected; the app pushes the roster ~1×/s.
+- Board: open the **Tracker** screen (it powers WiFi off and advertises as
+  "Trailmaster"); it shows **PAIR PHONE** until the app connects, then the radar.
+- Wire format the board parses (`convoy_net.h`): `S,lat,lon,hdg,spd,fix` (self) +
+  `C,callsign,lat,lon,online` per other car. UUIDs are shared between `app.js`
+  and `convoy_net.h`.
+- iPhones (no Web Bluetooth) stay map/radar participants; only the board owner's
+  phone needs the relay.
+
 ## Two views
 
 - **Map** — Leaflet map with everyone as markers (default).
