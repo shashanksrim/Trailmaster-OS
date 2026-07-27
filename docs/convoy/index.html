@@ -60,15 +60,34 @@
     .spacer { flex:1; }
     .leave { background:#000000aa; border:1px solid var(--line); color:var(--muted);
       padding:7px 12px; border-radius:20px; font-size:13px; cursor:pointer; font-family:inherit; }
-    .fab { position:absolute; right:14px; bottom:calc(env(safe-area-inset-bottom) + 190px); z-index:600;
-      width:44px; height:44px; border-radius:50%; background:var(--orange); color:#fff;
-      border:none; font-size:20px; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,.5); }
+    /* Radar (alternate) view — same scope as the Trailmaster tracker */
+    /* Full-bleed scope (like the round Trailmaster panel); sheet floats over the
+       lower third. position:fixed anchors it to the visual viewport so the scope
+       centre can't fall off-screen when the app box overflows. */
+    #radar { position:fixed; inset:0; background:#05080D; touch-action:none; display:block; z-index:1; }
+    .hdg-pill { position:absolute; top:calc(env(safe-area-inset-top) + 54px); left:50%;
+      transform:translateX(-50%); z-index:600; background:#14202B; color:#DDE6EC;
+      border:1px solid var(--orange); border-radius:20px; padding:6px 14px; font-size:14px;
+      font-weight:600; letter-spacing:1px; cursor:pointer; font-family:inherit; }
+
+    /* Floating action buttons (view toggle stacked above locate) */
+    .fabs { position:absolute; right:14px; bottom:calc(env(safe-area-inset-bottom) + 30dvh);
+      z-index:600; display:flex; flex-direction:column; gap:12px; }
+    .fab { width:46px; height:46px; border-radius:50%; background:#101418ee; color:var(--text);
+      border:1px solid var(--line); cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,.5);
+      display:flex; align-items:center; justify-content:center; padding:0; }
+    .fab svg { width:22px; height:22px; }
+    .fab.primary { border-color:var(--orange); color:var(--orange); }
+
     .sheet { position:absolute; left:0; right:0; bottom:0; z-index:600;
-      background:#141414ee; border-top:1px solid var(--line);
-      border-radius:18px 18px 0 0; padding:12px 14px calc(env(safe-area-inset-bottom) + 14px);
-      max-height:44dvh; overflow:auto; backdrop-filter:blur(6px); }
-    .sheet h2 { margin:2px 0 10px; font-size:11px; letter-spacing:2px; text-transform:uppercase;
-      color:var(--muted); }
+      background:#141414f2; border-top:1px solid var(--line);
+      border-radius:18px 18px 0 0; padding:0 14px calc(env(safe-area-inset-bottom) + 14px);
+      max-height:26dvh; overflow:hidden; backdrop-filter:blur(6px); transition:max-height .25s ease; }
+    .sheet.expanded { max-height:74dvh; overflow:auto; }
+    .grab { width:40px; height:5px; border-radius:3px; background:#ffffff33; margin:9px auto 2px; }
+    .sheet h2 { margin:6px 2px 8px; font-size:11px; letter-spacing:2px; text-transform:uppercase;
+      color:var(--muted); display:flex; justify-content:space-between; align-items:center; cursor:pointer; }
+    .sheet h2 .more { color:var(--orange); text-transform:none; letter-spacing:0; font-size:12px; font-weight:600; }
     .rrow { display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid #ffffff0f; }
     .rrow.off { opacity:.4; }
     .rdot { width:11px; height:11px; border-radius:50%; flex:none; }
@@ -138,15 +157,31 @@
   <!-- Map screen -->
   <section id="app" class="screen hidden">
     <div id="map"></div>
+    <canvas id="radar" class="hidden"></canvas>
+    <button class="hdg-pill hidden" id="hdg-btn">NORTH UP</button>
     <div class="topbar">
       <span class="chip" id="code-chip">—</span>
       <span class="count" id="count">0 cars</span>
       <span class="spacer"></span>
       <button class="leave" id="btn-leave">Leave</button>
     </div>
-    <button class="fab" id="btn-recenter" title="Recenter">◎</button>
-    <div class="sheet">
-      <h2>Convoy</h2>
+    <div class="fabs" id="fabs">
+      <button class="fab primary" id="btn-view" title="Switch view">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/>
+          <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>
+      </button>
+      <button class="fab" id="btn-recenter" title="Recenter">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="6"/>
+          <line x1="12" y1="1.5" x2="12" y2="4.5"/><line x1="12" y1="19.5" x2="12" y2="22.5"/>
+          <line x1="1.5" y1="12" x2="4.5" y2="12"/><line x1="19.5" y1="12" x2="22.5" y2="12"/>
+          <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>
+      </button>
+    </div>
+    <div class="sheet" id="sheet">
+      <div class="grab" id="sheet-grab"></div>
+      <h2 id="sheet-head"><span>Convoy</span><span class="more" id="sheet-more"></span></h2>
       <div id="roster"></div>
     </div>
   </section>

@@ -76,6 +76,15 @@ push and it's live at the URL above. Share that link with the convoy.
 
 ---
 
+## Two views
+
+- **Map** — Leaflet map with everyone as markers (default).
+- **Radar** — the same scope the Trailmaster device shows (`convoy_ui.h`): ME
+  pulsing at centre, other cars by true bearing + distance, range rings, N/E/S/W,
+  heading-up/north-up. Tap the **⊙ radar button** (above the locate button, lower
+  right) to switch; tap the heading pill to flip north-up ⇄ heading-up.
+- The **bottom sheet** lists the convoy; tap it to expand when there are more cars.
+
 ## How it works
 
 - Identity (`member id`, name, callsign) lives in `localStorage` — no login.

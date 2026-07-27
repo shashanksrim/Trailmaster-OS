@@ -67,6 +67,12 @@ let watchId = null, lastPush = 0, lastFix = null;
 let unsub = null, demoTimer = null;
 let map, markers = {}, members = {}, fitted = false;
 
+// Alternate radar view (port of the Trailmaster convoy_ui.h scope) + sheet state
+let view = "map", sheetExpanded = false, lastRowCount = 0;
+let radarCv = null, radarCtx = null, radarW = 0, radarH = 0;
+let radarRAF = null, radarLastDraw = 0, radarNorthUp = false;
+let radarHdg = 0, radarHdgValid = false;
+
 const now = () => Date.now() + serverOffset;
 const isConfigured = () => firebaseConfig.apiKey && firebaseConfig.apiKey !== "PASTE_ME";
 
@@ -81,6 +87,16 @@ function boot() {
   // cars — no Firebase, no GPS needed. Lets you see it work before any setup.
   $("btn-demo").addEventListener("click", startDemo);
   $("setup-demo").addEventListener("click", (e) => { e.preventDefault(); startDemo(); });
+
+  // Map-screen controls (need no Firebase, so wire them for demo + live alike).
+  $("btn-leave").addEventListener("click", leave);
+  $("btn-recenter").addEventListener("click", () => fitAll(true));
+  $("btn-view").addEventListener("click", toggleView);
+  $("hdg-btn").addEventListener("click", () => { radarNorthUp = !radarNorthUp; });
+  $("sheet-grab").addEventListener("click", toggleSheet);
+  $("sheet-head").addEventListener("click", toggleSheet);
+  window.addEventListener("resize", () => { if (view === "radar") sizeRadar(); });
+
   if (new URLSearchParams(location.search).has("demo")) { startDemo(); return; }
 
   if (!isConfigured()) { $("setup").classList.remove("hidden"); return; }
@@ -95,9 +111,6 @@ function boot() {
     $("f-code").value = code;
     doJoin(code);
   });
-  $("btn-leave").addEventListener("click", leave);
-  $("btn-recenter").addEventListener("click", () => fitAll(true));
-
   // Rejoin automatically if we were in a room last time.
   if (me.code) $("f-code").value = me.code;
 }
@@ -181,6 +194,11 @@ function leave() {
   if (myRef) { remove(myRef); }
   for (const k in markers) { map.removeLayer(markers[k]); }
   markers = {}; members = {}; fitted = false;
+  stopRadar();
+  if (view !== "map") switchView("map");
+  sheetExpanded = false;
+  $("sheet").classList.remove("expanded");
+  $("fabs").style.display = "flex";
   $("app").classList.add("hidden");
   $("join").classList.remove("hidden");
 }
@@ -288,6 +306,8 @@ function render() {
       <span class="rsub">${sub}</span></div>`;
   }).join("");
 
+  lastRowCount = rows.length;
+  updateSheetMore();
   if (!fitted) fitAll(false);
 }
 function bearing(a, b) {
@@ -305,11 +325,166 @@ function fitAll(force) {
   if (!force) fitted = true;
 }
 
+// ── Radar view — canvas port of convoy_ui.h (ME centre, cars by bearing/dist) ─
+const STEEL = "#1E3A4C";
+function niceScale(m) {
+  const s = [200, 500, 1000, 2000, 5000, 10000, 20000];
+  for (const v of s) if (m <= v) return v;
+  return 50000;
+}
+function sizeRadar() {
+  if (!radarCv) return;
+  // Size the bitmap to the visual viewport in CSS px (canvas is position:fixed
+  // inset:0, so that's its box). No dpr multiply and no reading the element's own
+  // size — that avoids a bitmap→box→resize feedback loop. 1:1, centre is centre.
+  radarW = window.innerWidth; radarH = window.innerHeight;
+  if (radarCv.width !== radarW) radarCv.width = radarW;
+  if (radarCv.height !== radarH) radarCv.height = radarH;
+  radarCtx = radarCv.getContext("2d");
+  radarCtx.setTransform(1, 0, 0, 1, 0, 0);
+}
+// Heading from our own GPS course, smoothed + held north-up when stopped (so the
+// scope doesn't spin on COG noise) — same policy as convoy_ui.h.
+function updateRadarHeading() {
+  const self = members[me.id];
+  const moving = self && self.speed != null && self.speed > 1.5;
+  if (!self || self.heading == null || !moving) { radarHdgValid = false; return; }
+  const deg = ((self.heading % 360) + 360) % 360;
+  if (!radarHdgValid) { radarHdg = deg; radarHdgValid = true; return; }
+  let diff = deg - radarHdg;
+  while (diff > 180) diff -= 360;
+  while (diff < -180) diff += 360;
+  radarHdg = ((radarHdg + diff * 0.25) % 360 + 360) % 360;
+}
+function drawRadar(ts) {
+  if (!radarCtx) return;
+  const ctx = radarCtx, cx = radarW / 2, cy = radarH * 0.44;  // nudged up over the sheet
+  const R = Math.min(radarW, radarH * 0.88) * 0.42;
+  ctx.clearRect(0, 0, radarW, radarH);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+
+  updateRadarHeading();
+  const northUp = radarNorthUp || !radarHdgValid;
+  const hdg = northUp ? 0 : radarHdg;
+
+  for (let i = 1; i <= 3; i++) {                       // range rings
+    ctx.beginPath(); ctx.arc(cx, cy, R * i / 3, 0, Math.PI * 2);
+    ctx.strokeStyle = STEEL; ctx.globalAlpha = i === 3 ? 0.8 : 0.5;
+    ctx.lineWidth = i === 3 ? 2 : 1; ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  const pill = $("hdg-btn");
+  pill.textContent = radarNorthUp ? "NORTH UP"
+    : radarHdgValid ? `${Math.round(hdg) % 360}° ${compass(hdg)}` : "-- HOLD";
+
+  for (const [lbl, abs] of [["N", 0], ["E", 90], ["S", 180], ["W", 270]]) {
+    const sa = (abs - hdg) * Math.PI / 180, rr = R - 12;
+    if (lbl === "N") { ctx.fillStyle = SELF_COLOR; ctx.font = `bold ${northUp ? 22 : 15}px system-ui,sans-serif`; }
+    else { ctx.fillStyle = "#4A6472"; ctx.font = "12px system-ui,sans-serif"; }
+    ctx.fillText(lbl, cx + rr * Math.sin(sa), cy - rr * Math.cos(sa));
+  }
+  if (!northUp) {                                       // forward lubber + chevron
+    ctx.strokeStyle = SELF_COLOR; ctx.globalAlpha = 0.35; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cx, cy - 14); ctx.lineTo(cx, cy - (R - 6)); ctx.stroke();
+    ctx.globalAlpha = 1; ctx.fillStyle = SELF_COLOR; ctx.font = "15px system-ui,sans-serif";
+    ctx.fillText("▲", cx, cy - (R + 2));
+  }
+
+  const self = members[me.id] || {};
+  if (self.lat == null || self.lon == null) {
+    ctx.fillStyle = SELF_COLOR; ctx.font = "16px system-ui,sans-serif";
+    ctx.fillText("ACQUIRING GPS…", cx, cy);
+    return;
+  }
+
+  const t = now();
+  let maxd = 0; const others = [];
+  for (const [id, m] of Object.entries(members)) {
+    if (id === me.id || m.lat == null) continue;
+    if (t - (m.ts || 0) > STALE_DROP_MS) continue;
+    const d = distM(self, m), online = t - (m.ts || 0) < ONLINE_WINDOW_MS;
+    if (online && d > maxd) maxd = d;
+    others.push({ id, m, d, b: bearing(self, m), online });
+  }
+  const scale = niceScale(maxd || 1);
+
+  ctx.fillStyle = "#4E6675"; ctx.font = "12px system-ui,sans-serif"; ctx.textAlign = "left";
+  ctx.fillText(fmtDist(scale), cx + R * 0.6, cy - R * 0.66);
+  ctx.textAlign = "center";
+
+  for (const o of others) {
+    const rel = (o.b - hdg) * Math.PI / 180;
+    const rpx = Math.min(o.d / scale * R, R);
+    const x = cx + rpx * Math.sin(rel), y = cy - rpx * Math.cos(rel);
+    ctx.globalAlpha = o.online ? 1 : 0.4;
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = colorFor(o.id); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke();
+    ctx.fillStyle = colorFor(o.id); ctx.font = "bold 13px system-ui,sans-serif";
+    ctx.fillText(o.m.callsign || "?", x, y - 16);
+    ctx.globalAlpha = 1;
+  }
+
+  const phase = (ts % 1600) / 1600;                     // ME pulse + dot
+  ctx.beginPath(); ctx.arc(cx, cy, 11 + phase * 22, 0, Math.PI * 2);
+  ctx.strokeStyle = SELF_COLOR; ctx.globalAlpha = 1 - phase; ctx.lineWidth = 2; ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+  ctx.fillStyle = SELF_COLOR; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.stroke();
+  ctx.fillStyle = SELF_COLOR; ctx.font = "bold 12px system-ui,sans-serif";
+  ctx.fillText("ME", cx, cy - 16);
+}
+function radarLoop(ts) {
+  if (view !== "radar") { radarRAF = null; return; }
+  // Re-size only when the viewport actually changed (rotate/resize) — compares
+  // against innerWidth/innerHeight, which the bitmap doesn't affect, so no loop.
+  if (window.innerWidth !== radarW || window.innerHeight !== radarH) sizeRadar();
+  if (ts - radarLastDraw >= 33) { radarLastDraw = ts; drawRadar(ts); }  // ~30fps
+  radarRAF = requestAnimationFrame(radarLoop);
+}
+function startRadar() { if (!radarRAF) radarRAF = requestAnimationFrame(radarLoop); }
+function stopRadar() { if (radarRAF) { cancelAnimationFrame(radarRAF); radarRAF = null; } }
+
+const ICON_RADAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>`;
+const ICON_MAP = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><line x1="9" y1="4" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="20"/></svg>`;
+
+function switchView(to) {
+  view = to;
+  const mapEl = $("map"), rad = $("radar"), pill = $("hdg-btn"),
+        rec = $("btn-recenter"), vbtn = $("btn-view");
+  if (to === "radar") {
+    mapEl.classList.add("hidden"); rad.classList.remove("hidden"); pill.classList.remove("hidden");
+    rec.style.display = "none"; vbtn.innerHTML = ICON_MAP; vbtn.title = "Map view";
+    sizeRadar(); startRadar();
+  } else {
+    rad.classList.add("hidden"); pill.classList.add("hidden"); mapEl.classList.remove("hidden");
+    rec.style.display = ""; vbtn.innerHTML = ICON_RADAR; vbtn.title = "Radar view";
+    stopRadar(); setTimeout(() => { if (map) map.invalidateSize(); }, 30);
+  }
+}
+function toggleView() { switchView(view === "radar" ? "map" : "radar"); }
+
+function toggleSheet() {
+  sheetExpanded = !sheetExpanded;
+  $("sheet").classList.toggle("expanded", sheetExpanded);
+  $("fabs").style.display = sheetExpanded ? "none" : "flex";
+  updateSheetMore();
+}
+function updateSheetMore() {
+  const el = $("sheet-more"); if (!el) return;
+  if (sheetExpanded) { el.textContent = "tap to collapse"; return; }
+  el.textContent = lastRowCount > 2 ? `+${lastRowCount - 2} more · tap` : "";
+}
+
 // ── UI helpers ────────────────────────────────────────────────────────────────
 function showMap(code) {
   $("join").classList.add("hidden");
   $("app").classList.remove("hidden");
   $("code-chip").textContent = code;
+  radarCv = $("radar");
+  view = "map";
   ensureMap();
   setTimeout(() => map.invalidateSize(), 50);   // map was hidden when created
 }
