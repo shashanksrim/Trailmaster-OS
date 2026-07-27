@@ -28,3 +28,8 @@ export const PUSH_INTERVAL_MS = 4000;
 // A member is considered "online" if we've heard from them within this window.
 // 120 s matches convoy_ui.h's online window on the Trailmaster board.
 export const ONLINE_WINDOW_MS = 120000;
+
+// A member we haven't heard from for this long is dropped from the map/roster.
+// Between ONLINE_WINDOW_MS and here they show greyed ("offline") — so a phone
+// that briefly locks or loses signal fades rather than vanishing instantly.
+export const STALE_DROP_MS = 600000;   // 10 min

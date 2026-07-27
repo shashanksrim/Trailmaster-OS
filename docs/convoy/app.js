@@ -7,9 +7,9 @@
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getDatabase, ref, set, remove, update, onValue, onDisconnect,
+  getDatabase, ref, set, remove, update, onValue,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS } from "./config.js";
+import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS } from "./config.js";
 
 // ── Colors: mirror convoy_ui.h so the phone map and the board radar agree ─────
 const HUES = ["#00E5FF", "#00E676", "#FFD54F", "#FF4081", "#B388FF", "#FF8A65"];
@@ -35,6 +35,13 @@ function colorFor(id) {
   let h = 0;
   for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return HUES[h % HUES.length];
+}
+// Convoy codes are case-insensitive, ignore spaces, and tolerate a leading
+// "TM-" (older generated codes carried it) — so NA4V, na4v, "NA 4V" and
+// TM-NA4V all resolve to the same room. Prevents "we typed the same code but
+// see different rooms" splits.
+function normalizeCode(raw) {
+  return (raw || "").trim().toUpperCase().replace(/\s+/g, "").replace(/^TM-/, "");
 }
 
 // ── Geo math (haversine + bearing), same formulas as convoy_ui.h ──────────────
@@ -84,7 +91,7 @@ function boot() {
 
   $("btn-join").addEventListener("click", () => doJoin($("f-code").value));
   $("btn-create").addEventListener("click", () => {
-    const code = "TM-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+    const code = Math.random().toString(36).slice(2, 6).toUpperCase();   // e.g. NA4V
     $("f-code").value = code;
     doJoin(code);
   });
@@ -99,7 +106,7 @@ function boot() {
 function doJoin(rawCode) {
   const name = $("f-name").value.trim();
   const callsign = $("f-callsign").value.trim().toUpperCase().slice(0, 5);
-  const code = (rawCode || "").trim().toUpperCase();
+  const code = normalizeCode(rawCode);
   $("f-err").textContent = "";
 
   if (!name)     return err("Enter your name.");
@@ -120,7 +127,8 @@ function doJoin(rawCode) {
     name, callsign, color: colorFor(me.id),
     lat: null, lon: null, heading: null, speed: null, ts: now(),
   });
-  onDisconnect(myRef).remove();          // vanish from the room on tab close
+  // No onDisconnect-remove: a phone that locks or dips out of signal should fade
+  // (via stale ts), not vanish. The explicit Leave button removes you cleanly.
 
   startGeo();
   subscribe();
@@ -170,7 +178,7 @@ function leave() {
   if (demoTimer) { clearInterval(demoTimer); demoTimer = null; }
   if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   if (unsub) { unsub(); unsub = null; }
-  if (myRef) { onDisconnect(myRef).cancel(); remove(myRef); }
+  if (myRef) { remove(myRef); }
   for (const k in markers) { map.removeLayer(markers[k]); }
   markers = {}; members = {}; fitted = false;
   $("app").classList.add("hidden");
@@ -236,8 +244,10 @@ function render() {
 
   const live = {};
   for (const [id, m] of Object.entries(members)) {
-    const online = t - (m.ts || 0) < ONLINE_WINDOW_MS;
     const isSelf = id === me.id;
+    const age = t - (m.ts || 0);
+    if (!isSelf && age > STALE_DROP_MS) continue;   // long-gone: drop from view
+    const online = age < ONLINE_WINDOW_MS;
     const color = isSelf ? SELF_COLOR : colorFor(id);
     live[id] = true;
 
