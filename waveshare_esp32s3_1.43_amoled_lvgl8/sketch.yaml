@@ -6,6 +6,7 @@ profiles:
     libraries:
       - lvgl (8.3.11)
       - AnimatedGIF (2.2.0)
+      - NimBLE-Arduino (2.5.0)
     programmer: ""
     port_config:
       baudrate: "115200"

@@ -17,6 +17,12 @@
 #include "screen_game.h"
 #include "retro_engine.h"
 #include "screen_inclinometer.h"
+#include "convoy_ui.h"   // shared convoy/tracker radar (same header the sim renders)
+#include "convoy_link.h" // BLE client to the co-located Meshtastic T-Beam (NimBLE 2.x)
+#include "convoy_net.h"  // BLE peripheral: phone (Web Bluetooth) pushes the convoy roster
+// Tracker data source: 0 = Meshtastic T-Beam mesh (BLE central, convoy_link.h),
+//                      1 = phone relay over BLE (peripheral, convoy_net.h).
+#define CONVOY_SOURCE_NET 1
 #include "PhotoFrameApp.h"
 #include "NesEngine.h"
 #include "sd_card_bsp.h"
@@ -80,6 +86,13 @@ static lv_obj_t * settings_screen = NULL;
 static int brightness_level = 8; // 1-10, default 8 (~200/255)
 int use_grid_launcher = 1; // 1 = grid, 0 = list
 int use_jimny_logo = 0; // 1 = jimny logo, 0 = custom/trailmaster (Default OFF as requested)
+bool tracker_enabled = true; // Settings toggle: show the Convoy Tracker launcher tile
+// Tracker "radio mode": while the Tracker is open it OWNS the radio — WiFi is
+// powered down (frees internal RAM/DMA) and BLE runs instead. WiFi+BLE+the AMOLED
+// don't fit in internal RAM together (BLE corrupts the display). The OBD worker
+// watches convoy_radio_mode and releases WiFi; convoy_obd_released acks it.
+volatile bool convoy_radio_mode = false;
+volatile bool convoy_obd_released = false;
 lv_obj_t * sel_bar = NULL;
 lv_obj_t * grid_container = NULL;
 
@@ -154,13 +167,22 @@ void obdBackgroundWorker(void *pvParameters) {
     while(1) {
         // Yield if we are in other heavy modes, if AP is running, or if OTA is active to prevent resource/WiFi conflicts
         const OTAStatus* ota_st = ota_get_status();
-        if (currentMode == MODE_PHOTOFRAME || currentMode == MODE_EMULATOR || wifi_ap_running || ota_st->state != OTA_IDLE) { 
+        // Tracker radio mode: release WiFi entirely so BLE can own the radio.
+        if (convoy_radio_mode) {
+            if (client.connected()) { client.stop(); }
+            WiFi.disconnect(true, true);
+            convoy_obd_released = true;      // ack: WiFi released, safe to power down
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        convoy_obd_released = false;
+        if (currentMode == MODE_PHOTOFRAME || currentMode == MODE_EMULATOR || wifi_ap_running || ota_st->state != OTA_IDLE) {
             if (client.connected()) { client.stop(); }
             if (!wifi_ap_running && ota_st->state == OTA_IDLE) {
                 WiFi.disconnect(true, true);
             }
-            vTaskDelay(pdMS_TO_TICKS(1000)); 
-            continue; 
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
         
         // Ensure WiFi Connection in Station Mode
@@ -560,6 +582,41 @@ void build_settings_screen() {
         p.putInt("grid_launcher", use_grid_launcher);
         p.end();
         Serial.printf("[SETTINGS] Grid Launcher set to %d\n", use_grid_launcher);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // ─── ROW 1.8: Convoy Tracker Toggle ──────────────────────────────────────
+    lv_obj_t * row_trk = lv_obj_create(scr_rows);
+    lv_obj_set_size(row_trk, 430, 80);
+    lv_obj_set_style_bg_color(row_trk, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(row_trk, 255, 0);
+    lv_obj_set_style_border_width(row_trk, 1, 0);
+    lv_obj_set_style_border_color(row_trk, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(row_trk, 12, 0);
+    lv_obj_clear_flag(row_trk, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * lbl_trk = lv_label_create(row_trk);
+    lv_label_set_text(lbl_trk, "Convoy Tracker");
+    lv_obj_set_style_text_font(lbl_trk, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(lbl_trk, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(lbl_trk, LV_ALIGN_LEFT_MID, 14, 0);
+
+    lv_obj_t * sw_trk = lv_switch_create(row_trk);
+    lv_obj_align(sw_trk, LV_ALIGN_RIGHT_MID, -20, 0);
+    lv_obj_set_size(sw_trk, 60, 30);
+    lv_obj_set_style_bg_color(sw_trk, lv_color_hex(0xFF6A00), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
+    if (tracker_enabled) lv_obj_add_state(sw_trk, LV_STATE_CHECKED);
+    else lv_obj_clear_state(sw_trk, LV_STATE_CHECKED);
+
+    lv_obj_add_event_cb(sw_trk, [](lv_event_t * e) {
+        if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+        lv_obj_t * obj = lv_event_get_target(e);
+        tracker_enabled = lv_obj_has_state(obj, LV_STATE_CHECKED);
+        Preferences p;
+        p.begin("hellojimny", false);
+        p.putInt("tracker_en", tracker_enabled ? 1 : 0);
+        p.end();
+        Serial.printf("[SETTINGS] Convoy Tracker set to %d\n", tracker_enabled);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
     make_settings_section_header(scr_rows, "BOOT IMAGE");
@@ -1561,6 +1618,7 @@ void setup() {
         p.begin("hellojimny", false);
         use_jimny_logo = p.getInt("jimny_logo", 0); // Default to 0 (Trailmaster)
         use_grid_launcher = p.getInt("grid_launcher", 1); // Default to 1 (Grid launcher on)
+        tracker_enabled = p.getInt("tracker_en", 1) ? true : false; // Default ON
         p.end();
         Serial.printf("[SETTINGS] Pre-splash: grid_launcher = %d, jimny_logo = %d\n", use_grid_launcher, use_jimny_logo);
     }
@@ -1726,6 +1784,9 @@ void setup() {
 
     // Spawn core-0 dedicated OBD background telemetry parsing engine
     xTaskCreatePinnedToCore(obdBackgroundWorker, "OBD_Task", 8192, NULL, 1, NULL, 0);
+    // NOTE: the Convoy BLE link is NOT started here — it spins up only when the
+    // user opens the Tracker screen (convoy_open_screen) and is torn down on exit,
+    // so BLE never competes with WiFi/OBD for internal RAM during normal use.
 
     // Boot into default speedometer dynamically without conflicting with ui.c animations
     if (default_speedometer == 1) {
@@ -1796,6 +1857,10 @@ void loop() {
                 qmi8658_enableSensors(QMI8658_DISABLE_ALL);
                 imu_ready = false;
                 Serial.println("[IMU] Sensors DISABLED - screen exited");
+            }
+            // LEAVING tracker: tear down the BLE link to free RAM for WiFi/OBD
+            if (prev_act_scr == convoy_screen && act_scr != convoy_screen) {
+                convoy_link_stop();
             }
             prev_act_scr = act_scr;
             screen_load_time = millis();
@@ -1940,3 +2005,120 @@ extern "C" {
 // Shared with the simulator (sim/) — see grid_launcher_ui.h. Editing that
 // file changes what BOTH the device and the sim render; there's only one copy.
 #include "grid_launcher_ui.h"
+
+// ─── TRACKER (convoy radar) ───────────────────────────────────────────────
+// PROTOTYPE: driven by mock data so it renders on the device today. To switch
+// to the real Meshtastic T-Beam feed, add NimBLE-Arduino, then in setup()
+//   #include "convoy_link.h"  →  convoy_link_begin(); + a FreeRTOS task calling
+//   convoy_link_loop();  and delete convoy_mock_tick (convoy_link feeds the same
+//   convoy_set_self/heading/car). convoy_refresh() must stay on this UI thread.
+// BLE link to the T-Beam runs ONLY while the Tracker screen is open, so it never
+// fights WiFi/OBD for internal RAM during normal use. Started in
+// convoy_open_screen(), stopped when the user leaves the Tracker (loop()).
+static TaskHandle_t convoyTaskHandle = NULL;
+static volatile bool convoyRun = false;
+
+static void convoyLinkTask(void * arg) {
+    (void)arg;
+    // ── Acquire the radio: pause OBD, wait for it to release WiFi, power WiFi
+    // down (frees ~50KB internal RAM), THEN bring up BLE. Order matters — BLE
+    // must not init while WiFi is still holding internal/DMA RAM.
+    convoy_radio_mode = true;
+    for (int i = 0; i < 40 && !convoy_obd_released; i++) vTaskDelay(pdMS_TO_TICKS(100));
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    Serial.printf("[CVY] WiFi off; internal RAM=%u — starting BLE\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+#if CONVOY_SOURCE_NET
+    convoy_net_begin();                            // BLE peripheral (phone relay)
+    while (convoyRun) vTaskDelay(pdMS_TO_TICKS(100));  // event-driven; nothing to poll
+    convoy_net_end();                              // free the BLE stack
+#else
+    convoy_link_begin();
+    while (convoyRun) { convoy_link_loop(); vTaskDelay(pdMS_TO_TICKS(50)); }
+    convoy_link_end();                 // disconnect + free the BLE stack
+#endif
+
+    // ── Release the radio back to WiFi/OBD (worker re-inits WiFi on its own).
+    convoy_radio_mode = false;
+    Serial.println("[CVY] radio released back to WiFi/OBD");
+    convoyTaskHandle = NULL;
+    vTaskDelete(NULL);
+}
+
+// Master switch for the BLE link. ON: the Tracker enters "radio mode" — WiFi is
+// powered down first (convoyLinkTask), freeing the internal RAM that NimBLE
+// otherwise collided with (which corrupted the AMOLED). BLE runs while the
+// Tracker is open; leaving hands the radio back to WiFi/OBD.
+#define CONVOY_BLE_ENABLE 1
+
+static void convoy_link_start(void) {
+#if CONVOY_BLE_ENABLE
+    if (convoyTaskHandle || !tracker_enabled) return;
+    convoyRun = true;
+    xTaskCreatePinnedToCore(convoyLinkTask, "Convoy_BLE", 8192, NULL, 1, &convoyTaskHandle, 0);
+#endif
+}
+static void convoy_link_stop(void) { convoyRun = false; }   // task self-cleans
+
+static void convoy_mock_tick(lv_timer_t * t) {
+    (void)t;
+    if (lv_scr_act() != convoy_screen) return;
+#if CONVOY_BLE_ENABLE
+  #if CONVOY_SOURCE_NET
+    // Phone-relay mode: overlay until the paired phone streams a roster, then let
+    // the BLE write-callback's convoy_set_* data drive the radar.
+    convoy_net_state_t st = convoy_net_status();
+    if (st == CONVOY_NET_ONLINE) { convoy_set_status(NULL); convoy_refresh(); return; }
+    convoy_set_status(st == CONVOY_NET_CONNECTED ? "PAIRED - WAITING" : "PAIR PHONE");
+    convoy_refresh();
+    return;
+  #else
+    // Mesh mode: show an "initialising" overlay until the T-Beam streams, then
+    // let the BLE task's convoy_set_* data drive the radar.
+    convoy_link_state_t st = convoy_link_status();
+    if (st == CONVOY_LINK_ONLINE) { convoy_set_status(NULL); convoy_refresh(); return; }
+    const char * msg = (st == CONVOY_LINK_CONNECTING) ? "CONNECTING"
+                     : (st == CONVOY_LINK_SCANNING)   ? "SEARCHING"
+                     :                                  "STARTING RADIO";
+    convoy_set_status(msg);
+    convoy_set_self(0, 0, false);     // no fix yet
+    convoy_refresh();
+    return;
+  #endif
+#else
+    // When the real T-Beam link is up, its task feeds convoy_set_*; just redraw.
+    if (convoy_link_status() == CONVOY_LINK_ONLINE) { convoy_refresh(); return; }
+    static float phase = 0; phase += 0.02f;
+    const double slat = 12.9716, slon = 77.5946;          // mock ~Bengaluru
+    convoy_set_self(slat, slon, true);
+    double hdg = 300.0 + phase * 6.0 + sinf(phase * 0.5f) * 35.0;   // slow weave
+    convoy_set_heading(hdg, true);
+    const double mlat = 111320.0, mlon = 111320.0 * cos(cv_d2r(slat));
+    struct { const char * n; float b0; float d; float s; uint32_t c; } defs[] = {
+        { "C2",  40,  650,  1.0f, 0x00E5FF }, { "C3", 155, 1250, -0.7f, 0x00E676 },
+        { "C4", 250,  320,  1.6f, 0xFFD54F }, { "C5", 310, 1900,  0.4f, 0xFF4081 },
+    };
+    for (int i = 0; i < 4; i++) {
+        float brg  = defs[i].b0 + phase * defs[i].s * 20.0f;
+        float dist = defs[i].d  + sinf(phase * 0.6f + i) * 120.0f;
+        double dN = dist * cos(cv_d2r(brg)), dE = dist * sin(cv_d2r(brg));
+        convoy_set_car(i, defs[i].n, slat + dN / mlat, slon + dE / mlon,
+                       lv_color_hex(defs[i].c), true, true);
+    }
+    convoy_refresh();
+#endif
+}
+
+extern "C" void convoy_open_screen() {
+    convoy_build_screen();
+    static lv_timer_t * ctmr = nullptr;
+    if (!ctmr) ctmr = lv_timer_create(convoy_mock_tick, 200, NULL);
+    currentMode = MODE_UI;                 // treat as a normal UI screen
+    convoy_link_start();                   // (no-op while CONVOY_BLE_ENABLE == 0)
+    // Load exactly like the (known-good) Settings screen: plain fade, opaque
+    // backdrop provides full coverage. No force_full_ui_redraw / driver poking.
+    lv_scr_load_anim(convoy_screen, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
+}
