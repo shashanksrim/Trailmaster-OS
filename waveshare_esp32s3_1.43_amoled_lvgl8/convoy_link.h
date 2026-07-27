@@ -353,9 +353,45 @@ static void convoy_link_loop(void) {
 
 static convoy_link_state_t convoy_link_status(void) { return s_link_state; }
 
+// ── Source-picker support ────────────────────────────────────────────────────
+// Scan-only bring-up: init the stack with no target so convoy_link_loop() just
+// scans and fills s_scan (read via convoy_link_scan_list). Used by the picker.
+static void convoy_link_begin_scan(void) {
+    Serial.println("[CVY] scan-only begin");
+    NimBLEDevice::init("Trailmaster");
+    NimBLEDevice::setSecurityAuth(true, false, false);
+    NimBLEDevice::setMTU(517);
+    s_have_target = false;
+    s_scan_count  = 0;
+    s_link_state  = CONVOY_LINK_IDLE;   // loop starts scanning
+}
+// Expose the current scan results (name/mac/rssi), newest snapshot. Returns count.
+static int convoy_link_scan_list(convoy_scan_dev_t **out) { *out = s_scan; return s_scan_count; }
+// Stop scanning and connect to a specific T-Beam MAC (from the picker).
+static void convoy_link_connect_mac(const char *mac) {
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan && scan->isScanning()) scan->stop();
+    s_target = NimBLEAddress(std::string(mac), BLE_ADDR_PUBLIC);
+    s_have_target = true;
+    s_link_state = CONVOY_LINK_CONNECTING;
+    Serial.printf("[CVY] connect to picked %s\n", mac);
+}
+// Restart scanning (stay central; no NimBLE re-init) — e.g. mesh → rescan.
+static void convoy_link_rescan(void) {
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan && scan->isScanning()) scan->stop();
+    if (s_client && s_client->isConnected()) s_client->disconnect();
+    s_have_target = false;
+    s_scan_count  = 0;
+    s_link_state  = CONVOY_LINK_IDLE;   // loop restarts the scan
+}
+
 // Tear the link down and free the BLE stack (called when leaving the Tracker so
 // the internal RAM goes back to WiFi/OBD).
 static void convoy_link_end(void) {
+    // Stop any active scan BEFORE deinit — deinit while scanning panics NimBLE.
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan && scan->isScanning()) scan->stop();
     if (s_client && s_client->isConnected()) s_client->disconnect();
     NimBLEDevice::deinit(true);
     s_client = nullptr; s_toradio = nullptr; s_fromradio = nullptr;

@@ -73,7 +73,12 @@ static lv_obj_t *convoy_scale_lbl = NULL;   // outer-ring range tag (radar NE)
 static lv_obj_t *convoy_info_dist = NULL;   // nearest car distance (hero)
 static lv_obj_t *convoy_info_dir  = NULL;   // nearest: callsign · bearing · NEAREST
 static lv_obj_t *convoy_status_lbl = NULL;  // link-status overlay ("CONNECTING")
+static lv_obj_t *convoy_info_cta  = NULL;   // "Tap for settings" CTA (waiting state)
 static bool      convoy_card_shown = true;
+static bool      convoy_waiting    = false; // true while no live source/fix
+static void    (*convoy_settings_cb)(void) = NULL;  // tap-while-waiting → source picker
+static const char *convoy_wait_line = "Waiting for Mesh/Phone";  // middle line, muted
+static const char *convoy_wait_cta  = "Tap for settings";        // bright CTA line
 
 // ── Math helpers (great-circle distance + bearing) ──────────────────────────
 static inline double cv_d2r(double d) { return d * 0.017453292519943295; }
@@ -142,8 +147,16 @@ static void convoy_pulse_exec(void *obj, int32_t v) {  // v: 0..100
 }
 
 // Single tap anywhere toggles the floating metadata card (bottom-sheet style).
+// Tapping the floating panel opens the source picker (switch mesh ⇄ phone).
+static void convoy_open_settings(lv_event_t *e) {
+    (void)e;
+    if (convoy_settings_cb) convoy_settings_cb();
+}
 static void convoy_toggle_card(lv_event_t *e) {
     (void)e;
+    // While waiting for a source/fix, any tap opens the source picker instead of
+    // toggling the metadata card ("Tap for settings").
+    if (convoy_waiting && convoy_settings_cb) { convoy_settings_cb(); return; }
     convoy_card_shown = !convoy_card_shown;
     if (convoy_card_shown) {
         lv_obj_clear_flag(convoy_card, LV_OBJ_FLAG_HIDDEN);
@@ -300,20 +313,22 @@ static lv_obj_t *convoy_build_screen(void) {
         lv_obj_add_flag(convoy_cars[i].lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // ── Floating metadata card (lower third, tap to dismiss) ────────────────
-    // A translucent rounded panel sized so its lower corners tuck inside the
-    // round bezel; single tap hides it to reveal the whole scope.
+    // ── Floating metadata card (lower third) ────────────────────────────────
+    // 80%-black rounded panel; tapping it opens the source picker so you can
+    // switch mesh ⇄ phone at any time (a tap elsewhere toggles the card).
     convoy_card = lv_obj_create(scr);
     lv_obj_remove_style_all(convoy_card);
     lv_obj_set_size(convoy_card, 280, 100);
     lv_obj_set_style_radius(convoy_card, 22, 0);
-    lv_obj_set_style_bg_color(convoy_card, lv_color_hex(0x0A0F16), 0);
-    lv_obj_set_style_bg_opa(convoy_card, LV_OPA_90, 0);
+    lv_obj_set_style_bg_color(convoy_card, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(convoy_card, LV_OPA_80, 0);
     lv_obj_set_style_border_color(convoy_card, lv_color_hex(0x1E3A4C), 0);
     lv_obj_set_style_border_width(convoy_card, 1, 0);
     lv_obj_set_style_border_opa(convoy_card, LV_OPA_70, 0);
     lv_obj_align(convoy_card, LV_ALIGN_BOTTOM_MID, 0, -58);
-    lv_obj_clear_flag(convoy_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(convoy_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(convoy_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(convoy_card, convoy_open_settings, LV_EVENT_CLICKED, NULL);
 
     // Status row inside the card: GPS state (left) + online count (right).
     convoy_gps_lbl = cv_label(convoy_card, &lv_font_montserrat_16, lv_color_hex(0x00E676));
@@ -333,6 +348,13 @@ static lv_obj_t *convoy_build_screen(void) {
     lv_label_set_text(convoy_info_dir, "");
     lv_obj_align(convoy_info_dir, LV_ALIGN_BOTTOM_MID, 0, -6);
 
+    // "Tap for settings" — shown only while waiting for a source (near-white,
+    // a touch bigger than the status line). Hidden once data is flowing.
+    convoy_info_cta = cv_label(convoy_card, &lv_font_montserrat_20, lv_color_hex(0xE6E6E6));
+    lv_label_set_text(convoy_info_cta, convoy_wait_cta);
+    lv_obj_align(convoy_info_cta, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_add_flag(convoy_info_cta, LV_OBJ_FLAG_HIDDEN);
+
     // Dismissed-state cue.
     convoy_hint = cv_label(scr, &lv_font_montserrat_14, lv_color_hex(0x4E6675));
     lv_label_set_text(convoy_hint, LV_SYMBOL_UP " TAP FOR DETAILS");
@@ -349,9 +371,11 @@ static lv_obj_t *convoy_build_screen(void) {
     lv_obj_add_flag(tap, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(tap, convoy_toggle_card, LV_EVENT_CLICKED, NULL);
 
-    // Keep the orientation button above the catcher so it gets its own taps
-    // (taps elsewhere fall through to the catcher and toggle the metadata card).
+    // Keep the orientation button + the floating card above the catcher so they
+    // get their own taps (card → source picker; a tap elsewhere toggles the card).
     lv_obj_move_foreground(convoy_hdg_lbl);
+    lv_obj_move_foreground(convoy_card);
+    lv_obj_move_foreground(convoy_hint);
 
     // Link-status overlay (e.g. "STARTING RADIO" / "CONNECTING") shown while the
     // BLE link is coming up; hidden once data streams. On top of everything.
@@ -409,12 +433,19 @@ static void convoy_refresh(void) {
         lv_label_set_text(convoy_hdg_lbl, "-- HOLD");
 
     if (!convoy_self_fix) {
+        // Waiting for a source (mesh/phone) or a GPS fix. The whole panel taps
+        // through to the source picker; hide the now-meaningless GPS/count chips.
+        convoy_waiting = true;
+        lv_obj_add_flag(convoy_gps_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(convoy_count_lbl, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(convoy_info_dist, "ACQUIRING");
         lv_obj_set_style_text_color(convoy_info_dist, CV_ORANGE, 0);
-        // Live feedback while waiting for the T-Beam GPS fix: rx = own-position
-        // packets received over BLE (climbs even at 0,0, so you can see the link
-        // is alive); flips to real coordinates the moment the fix lands.
-        lv_label_set_text_fmt(convoy_info_dir, "waiting for GPS   rx %d", convoy_self_updates);
+        lv_obj_align(convoy_info_dist, LV_ALIGN_CENTER, 0, -20);
+        lv_label_set_text(convoy_info_dir, convoy_wait_line);
+        lv_obj_set_style_text_color(convoy_info_dir, lv_color_hex(0x6B8595), 0);
+        lv_obj_align(convoy_info_dir, LV_ALIGN_CENTER, 0, 6);
+        lv_label_set_text(convoy_info_cta, convoy_wait_cta);
+        lv_obj_clear_flag(convoy_info_cta, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(convoy_scale_lbl, "");
         for (int i = 0; i < CONVOY_MAX_CARS; i++) {
             lv_obj_add_flag(convoy_cars[i].dot, LV_OBJ_FLAG_HIDDEN);
@@ -422,6 +453,13 @@ static void convoy_refresh(void) {
         }
         return;
     }
+    // Live source with a fix — restore the normal card layout.
+    convoy_waiting = false;
+    lv_obj_clear_flag(convoy_gps_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(convoy_count_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(convoy_info_cta, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(convoy_info_dist, LV_ALIGN_CENTER, 0, 6);
+    lv_obj_align(convoy_info_dir, LV_ALIGN_BOTTOM_MID, 0, -6);
 
     // Auto-scale to farthest visible car.
     double maxd = 0;
@@ -495,6 +533,15 @@ static inline void convoy_set_status(const char *msg) {
     } else {
         lv_obj_add_flag(convoy_status_lbl, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+// Customise the waiting-panel text — e.g. phone mode shows "Connect via browser"
+// + the short URL. Pass NULL to restore the defaults.
+static inline void convoy_set_wait_text(const char *line, const char *cta) {
+    convoy_wait_line = line ? line : "Waiting for Mesh/Phone";
+    convoy_wait_cta  = cta  ? cta  : "Tap for settings";
+    if (convoy_info_dir) lv_label_set_text(convoy_info_dir, convoy_wait_line);
+    if (convoy_info_cta) lv_label_set_text(convoy_info_cta, convoy_wait_cta);
 }
 
 // ── Setters the data source (firmware BLE / sim mock) calls ──────────────────

@@ -12,6 +12,7 @@
 #include "godzilla_placeholder.h" // static frame standing in for the animated car GIF
 #include "grid_launcher_ui.h"   // shared: build_grid_launcher() — the swipe-down app grid
 #include "convoy_ui.h"          // shared: radar-style convoy map (fed by T-Beam over BLE on device)
+#include "convoy_source_ui.h"   // shared: source picker (Meshtastic scan / phone)
 #include <emscripten.h>
 
 // OBD globals screen_ui.h expects (volatile, to match its extern declarations).
@@ -104,9 +105,42 @@ static void build_godzilla_screen_for_sim() {
 // Drifts a few cars around our position so the radar looks alive. On hardware,
 // convoy_set_self()/convoy_set_car() are fed from the Meshtastic node DB read
 // over BLE; the rendering in convoy_ui.h is identical either way.
+static bool convoy_sim_wait = false;   // sim: hold the waiting panel until a source is picked
+
+// Sim mock of the source-picker flow (firmware wires real scan/connect/advertise).
+static void convoy_sim_scan(void) {                    // tapped Meshtastic → mock list
+    convoy_src_clear_devices();
+    convoy_src_add_device("C2_c818", -67);
+    convoy_src_add_device("C1_a3f0", -81);
+}
+static void convoy_sim_pick(int idx) {                 // picked a T-Beam → mesh data
+    (void)idx; convoy_set_wait_text(NULL, NULL); convoy_sim_wait = false; lv_disp_load_scr(convoy_screen);
+}
+static void convoy_sim_phone(void) {                   // phone → radar shows browser help
+    convoy_set_wait_text("Connect via browser", "tinyurl.com/trailmstr");
+    lv_disp_load_scr(convoy_screen);                   // stays "waiting" until the phone links
+}
+static void convoy_sim_back(void)    { lv_disp_load_scr(convoy_screen); }
+
+// Tapping the radar's "Tap for settings" panel opens the source picker.
+static void convoy_sim_settings(void) {
+    convoy_src_build_screen();
+    convoy_src_on_scan        = convoy_sim_scan;
+    convoy_src_on_pick_device = convoy_sim_pick;
+    convoy_src_on_use_phone   = convoy_sim_phone;
+    convoy_src_on_back        = convoy_sim_back;
+    convoy_src_reset();
+    lv_disp_load_scr(convoy_src_screen);
+}
+
 static void convoy_demo_tick(lv_timer_t *t) {
     (void)t;
     if (lv_scr_act() != convoy_screen) return;
+    if (convoy_sim_wait) {                        // "Waiting for Mesh/Phone" state
+        convoy_set_self(0, 0, false);
+        convoy_refresh();
+        return;
+    }
     static float phase = 0; phase += 0.02f;
 
     const double slat = 12.9716, slon = 77.5946;   // us (mock, ~Bengaluru)
@@ -141,8 +175,11 @@ static void convoy_demo_tick(lv_timer_t *t) {
 // and load it.
 extern "C" void convoy_open_screen() {
     convoy_build_screen();
+    convoy_settings_cb = convoy_sim_settings;        // tap-while-waiting hook
+    convoy_sim_wait    = true;                        // start in the waiting state
     static bool tmr = false;
     if (!tmr) { lv_timer_create(convoy_demo_tick, 120, NULL); tmr = true; }
+    convoy_set_wait_text(NULL, NULL);
     lv_disp_load_scr(convoy_screen);
 }
 

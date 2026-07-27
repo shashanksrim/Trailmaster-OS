@@ -20,9 +20,7 @@
 #include "convoy_ui.h"   // shared convoy/tracker radar (same header the sim renders)
 #include "convoy_link.h" // BLE client to the co-located Meshtastic T-Beam (NimBLE 2.x)
 #include "convoy_net.h"  // BLE peripheral: phone (Web Bluetooth) pushes the convoy roster
-// Tracker data source: 0 = Meshtastic T-Beam mesh (BLE central, convoy_link.h),
-//                      1 = phone relay over BLE (peripheral, convoy_net.h).
-#define CONVOY_SOURCE_NET 1
+#include "convoy_source_ui.h" // source picker: choose Meshtastic (scan) or phone at runtime
 #include "PhotoFrameApp.h"
 #include "NesEngine.h"
 #include "sd_card_bsp.h"
@@ -1858,10 +1856,15 @@ void loop() {
                 imu_ready = false;
                 Serial.println("[IMU] Sensors DISABLED - screen exited");
             }
-            // LEAVING tracker: tear down the BLE link to free RAM for WiFi/OBD
-            if (prev_act_scr == convoy_screen && act_scr != convoy_screen) {
-                convoy_link_stop();
-            }
+            // LEAVING the tracker (radar OR either picker page): tear down the BLE
+            // link to free RAM for WiFi/OBD. Moving between radar ⇄ picker stays in.
+            bool prev_cvy = (prev_act_scr == convoy_screen ||
+                             prev_act_scr == convoy_src_screen ||
+                             prev_act_scr == convoy_src_scan_screen);
+            bool act_cvy  = (act_scr == convoy_screen ||
+                             act_scr == convoy_src_screen ||
+                             act_scr == convoy_src_scan_screen);
+            if (prev_cvy && !act_cvy) convoy_link_stop();
             prev_act_scr = act_scr;
             screen_load_time = millis();
         }
@@ -2018,28 +2021,59 @@ extern "C" {
 static TaskHandle_t convoyTaskHandle = NULL;
 static volatile bool convoyRun = false;
 
+// ── Runtime convoy source (replaces the old compile-time CONVOY_SOURCE_NET) ───
+// The user picks the source on-device (convoy_source_ui.h); the BLE task brings
+// up the matching NimBLE role and switches when the selection changes.
+typedef enum { CVS_NONE, CVS_SCAN, CVS_MESH, CVS_PHONE } cvs_source_t;
+static volatile cvs_source_t convoy_src_sel = CVS_NONE;   // what the UI wants
+static volatile bool convoy_role_ready = false;           // task set: the role is up
+static char convoy_sel_mac[18] = {0};                     // chosen T-Beam MAC (mesh)
+static const char * CONVOY_PHONE_URL = "tinyurl.com/trailmstr";
+
 static void convoyLinkTask(void * arg) {
     (void)arg;
     // ── Acquire the radio: pause OBD, wait for it to release WiFi, power WiFi
-    // down (frees ~50KB internal RAM), THEN bring up BLE. Order matters — BLE
-    // must not init while WiFi is still holding internal/DMA RAM.
+    // down (frees ~50KB internal RAM), THEN allow BLE. NimBLE must not init while
+    // WiFi is still holding internal/DMA RAM.
     convoy_radio_mode = true;
     for (int i = 0; i < 40 && !convoy_obd_released; i++) vTaskDelay(pdMS_TO_TICKS(100));
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
     vTaskDelay(pdMS_TO_TICKS(300));
-    Serial.printf("[CVY] WiFi off; internal RAM=%u — starting BLE\n",
+    Serial.printf("[CVY] WiFi off; internal RAM=%u — BLE task up\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-#if CONVOY_SOURCE_NET
-    convoy_net_begin();                            // BLE peripheral (phone relay)
-    while (convoyRun) vTaskDelay(pdMS_TO_TICKS(100));  // event-driven; nothing to poll
-    convoy_net_end();                              // free the BLE stack
-#else
-    convoy_link_begin();
-    while (convoyRun) { convoy_link_loop(); vTaskDelay(pdMS_TO_TICKS(50)); }
-    convoy_link_end();                 // disconnect + free the BLE stack
-#endif
+    cvs_source_t running = CVS_NONE;              // which BLE role is actually up
+    while (convoyRun) {
+        cvs_source_t want = convoy_src_sel;
+        if (want != running) {
+            bool was_c  = (running == CVS_SCAN || running == CVS_MESH);
+            bool want_c = (want == CVS_SCAN   || want == CVS_MESH);
+            if (was_c && want_c) {
+                // central → central (scan ⇄ mesh): keep NimBLE up, just retarget.
+                if (want == CVS_SCAN) convoy_link_rescan();
+                else                  convoy_link_connect_mac(convoy_sel_mac);
+            } else {
+                // role-class change or to/from NONE: full teardown then bring-up.
+                if (was_c) convoy_link_end();
+                else if (running == CVS_PHONE) convoy_net_end();
+                // Settle before bringing up the new role: lets the prior NimBLE
+                // stack fully tear down AND the display's full-redraw DMA finish,
+                // so the new NimBLE init doesn't collide with either.
+                vTaskDelay(pdMS_TO_TICKS(400));
+                if (want == CVS_SCAN)       convoy_link_begin_scan();
+                else if (want == CVS_MESH)  { convoy_link_begin_scan(); convoy_link_connect_mac(convoy_sel_mac); }
+                else if (want == CVS_PHONE) convoy_net_begin();
+            }
+            running = want;
+            convoy_role_ready = true;      // UI may now load the radar (init done)
+            Serial.printf("[CVY] role -> %d\n", (int)running);
+        }
+        if (running == CVS_SCAN || running == CVS_MESH) convoy_link_loop();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (running == CVS_SCAN || running == CVS_MESH) convoy_link_end();
+    else if (running == CVS_PHONE) convoy_net_end();
 
     // ── Release the radio back to WiFi/OBD (worker re-inits WiFi on its own).
     convoy_radio_mode = false;
@@ -2058,36 +2092,167 @@ static void convoy_link_start(void) {
 #if CONVOY_BLE_ENABLE
     if (convoyTaskHandle || !tracker_enabled) return;
     convoyRun = true;
-    xTaskCreatePinnedToCore(convoyLinkTask, "Convoy_BLE", 8192, NULL, 1, &convoyTaskHandle, 0);
+    xTaskCreatePinnedToCore(convoyLinkTask, "Convoy_BLE", 12288, NULL, 1, &convoyTaskHandle, 0);
 #endif
 }
 static void convoy_link_stop(void) { convoyRun = false; }   // task self-cleans
+
+// Clean screen loader for the picker flow. Two jobs, both to avoid the BLE task's
+// NimBLE role switch (which grabs/frees internal DMA RAM) colliding with the
+// display transition — that collision corrupts the AMOLED flush and, on the
+// heavier central→peripheral switch, crashes:
+//   1. defer the load OUT of the LVGL event, then force a full panel redraw;
+//   2. apply the pending source change ONLY AFTER the redraw settles, so the BLE
+//      switch never overlaps the heavy render.
+static lv_obj_t *  convoy_pending_scr = NULL;
+static cvs_source_t convoy_pending_sel = CVS_NONE;
+static bool        convoy_apply_sel   = false;
+static bool        convoy_load_busy   = false;  // a load (either kind) is in flight
+static lv_obj_t *  convoy_ready_scr   = NULL;   // target of a wait-for-role load
+static void convoy_deferred_load_cb(lv_timer_t * t) {
+    if (convoy_pending_scr) {
+        lv_scr_load(convoy_pending_scr);
+        force_full_ui_redraw(convoy_pending_scr);
+        convoy_pending_scr = NULL;
+    }
+    // A source change queued for a static screen (the scan page): apply it AFTER
+    // the load so the NimBLE init runs while that page is idle, not mid-render.
+    if (convoy_apply_sel) { convoy_role_ready = false; convoy_src_sel = convoy_pending_sel; convoy_apply_sel = false; }
+    if (!convoy_ready_scr) convoy_load_busy = false;
+    lv_timer_del(t);
+}
+static void convoy_load_clean(lv_obj_t * scr) {
+    // Drop repeat/no-op taps: every load forces a full 466×466 redraw, and
+    // stacking those (tapping ACQUIRING several times) piles up heavy renders.
+    if (convoy_load_busy || lv_scr_act() == scr) return;
+    convoy_load_busy   = true;
+    convoy_pending_scr = scr;
+    lv_timer_create(convoy_deferred_load_cb, 40, NULL);
+}
+// Queue a source change to apply after the next clean load (macro avoids the
+// Arduino auto-prototype hoisting a cvs_source_t parameter above its typedef).
+#define convoy_switch_source(s) do { convoy_pending_sel = (s); convoy_apply_sel = true; } while (0)
+
+// Load a screen ONLY once the BLE task reports the pending role change is fully
+// done (NimBLE init/deinit finished). Until then the currently shown (static,
+// non-rendering) page stays up, so the heavy redraw never overlaps a radio
+// transition — the collision that crashed (phone) and corrupted the flush
+// (mesh). Used in BOTH directions: picker → radar and radar → picker. ~4s cap.
+static uint32_t convoy_ready_t0 = 0;
+static void convoy_ready_load_cb(lv_timer_t * t) {
+    if (!convoy_role_ready && millis() - convoy_ready_t0 <= 4000) return;
+    lv_obj_t * scr = convoy_ready_scr ? convoy_ready_scr : convoy_screen;
+    convoy_ready_scr = NULL;
+    lv_timer_del(t);
+    lv_scr_load(scr);
+    force_full_ui_redraw(scr);
+    convoy_load_busy = false;
+}
+static void convoy_load_when_ready(lv_obj_t * scr) {
+    bool running = (convoy_ready_scr != NULL);
+    convoy_ready_scr = scr;
+    convoy_load_busy = true;
+    if (!running) {
+        convoy_ready_t0 = millis();
+        lv_timer_create(convoy_ready_load_cb, 120, NULL);
+    }
+}
+// Start a BLE role switch NOW (picker still shown → display idle), then load the
+// radar once the role is up.
+static void convoy_select_source_mesh(void) {
+    convoy_role_ready = false; convoy_src_sel = CVS_MESH;
+    convoy_load_when_ready(convoy_screen);
+}
+static void convoy_select_source_phone(void) {
+    convoy_role_ready = false; convoy_src_sel = CVS_PHONE;
+    convoy_load_when_ready(convoy_screen);
+}
+
+// ── Source-picker callbacks (UI thread) ──────────────────────────────────────
+static int convoy_scan_rendered = -1;    // last device count rendered into the list
+
+static void fw_src_scan(void) {           // tapped MESHTASTIC → start scanning
+    convoy_scan_rendered = -1;
+    convoy_switch_source(CVS_SCAN);        // applied after the scan page loads
+}
+static void fw_src_pick(int idx) {        // tapped a T-Beam → connect + persist
+    convoy_scan_dev_t * arr; int n = convoy_link_scan_list(&arr);
+    if (idx < 0 || idx >= n) return;
+    strncpy(convoy_sel_mac, arr[idx].mac, sizeof(convoy_sel_mac) - 1);
+    convoy_sel_mac[sizeof(convoy_sel_mac) - 1] = 0;
+    Preferences p; p.begin("convoy", false);
+    p.putString("tbeam_mac", convoy_sel_mac);
+    p.putInt("source", 1);
+    p.end();
+    convoy_set_wait_text(NULL, NULL);
+    convoy_set_self(0, 0, false);         // clear any stale position from the old source
+    convoy_select_source_mesh();          // switch now (picker stays up), radar loads when ready
+}
+static void fw_src_phone(void) {          // tapped USE PHONE → advertise + persist
+    Preferences p; p.begin("convoy", false);
+    p.putInt("source", 2);
+    p.end();
+    convoy_set_wait_text("Connect via browser", CONVOY_PHONE_URL);
+    convoy_set_self(0, 0, false);
+    convoy_select_source_phone();         // switch now (picker stays up), radar loads when ready
+}
+// X on page 1 → back to the radar, keeping the chosen source. If the user backed
+// out WITHOUT choosing one, the scan-only role is still up (CVS_SCAN): drop it to
+// CVS_NONE so a NimBLE scan isn't left running behind the radar, and wait for that
+// teardown before loading — an active scan colliding with the full-panel redraw is
+// what rebooted the board when tapping ACQUIRING with no source selected.
+static void fw_src_back(void) {
+    if (convoy_src_sel == CVS_SCAN) {
+        convoy_set_wait_text("No source selected", "Tap to choose");
+        convoy_role_ready = false;
+        convoy_src_sel    = CVS_NONE;
+        convoy_load_when_ready(convoy_screen);
+    } else {
+        convoy_load_clean(convoy_screen);
+    }
+}
+
+static void fw_open_picker(void) {        // radar panel tapped → open the picker
+    if (convoy_load_busy) return;         // a transition is already in flight
+    convoy_src_build_screen();
+    convoy_src_on_scan        = fw_src_scan;
+    convoy_src_on_pick_device = fw_src_pick;
+    convoy_src_on_use_phone   = fw_src_phone;
+    convoy_src_on_back        = fw_src_back;
+    convoy_src_reset();
+    if (convoy_src_sel == CVS_SCAN) {     // stray scan still running → stop it first
+        convoy_role_ready = false;
+        convoy_src_sel    = CVS_NONE;
+        convoy_load_when_ready(convoy_src_screen);
+    } else {
+        convoy_load_clean(convoy_src_screen);
+    }
+}
+
+// Render live BLE scan results into the picker list (UI thread; the task fills s_scan).
+static void convoy_picker_tick(lv_timer_t * t) {
+    (void)t;
+    if (lv_scr_act() != convoy_src_scan_screen) return;
+    convoy_scan_dev_t * arr; int n = convoy_link_scan_list(&arr);
+    if (n != convoy_scan_rendered) {
+        convoy_scan_rendered = n;
+        convoy_src_clear_devices();
+        for (int i = 0; i < n && i < CVSRC_MAX_DEV; i++)
+            convoy_src_add_device(arr[i].name, arr[i].rssi);
+        convoy_src_set_scanning(n == 0);
+    }
+}
 
 static void convoy_mock_tick(lv_timer_t * t) {
     (void)t;
     if (lv_scr_act() != convoy_screen) return;
 #if CONVOY_BLE_ENABLE
-  #if CONVOY_SOURCE_NET
-    // Phone-relay mode: overlay until the paired phone streams a roster, then let
-    // the BLE write-callback's convoy_set_* data drive the radar.
-    convoy_net_state_t st = convoy_net_status();
-    if (st == CONVOY_NET_ONLINE) { convoy_set_status(NULL); convoy_refresh(); return; }
-    convoy_set_status(st == CONVOY_NET_CONNECTED ? "PAIRED - WAITING" : "PAIR PHONE");
+    // Runtime source: no top status pill (the waiting card carries the messaging
+    // now). The BLE task's convoy_set_* data drives the radar; before a source
+    // connects, convoy_self_fix is false so the tappable waiting panel shows.
+    convoy_set_status(NULL);
     convoy_refresh();
     return;
-  #else
-    // Mesh mode: show an "initialising" overlay until the T-Beam streams, then
-    // let the BLE task's convoy_set_* data drive the radar.
-    convoy_link_state_t st = convoy_link_status();
-    if (st == CONVOY_LINK_ONLINE) { convoy_set_status(NULL); convoy_refresh(); return; }
-    const char * msg = (st == CONVOY_LINK_CONNECTING) ? "CONNECTING"
-                     : (st == CONVOY_LINK_SCANNING)   ? "SEARCHING"
-                     :                                  "STARTING RADIO";
-    convoy_set_status(msg);
-    convoy_set_self(0, 0, false);     // no fix yet
-    convoy_refresh();
-    return;
-  #endif
 #else
     // When the real T-Beam link is up, its task feeds convoy_set_*; just redraw.
     if (convoy_link_status() == CONVOY_LINK_ONLINE) { convoy_refresh(); return; }
@@ -2114,11 +2279,46 @@ static void convoy_mock_tick(lv_timer_t * t) {
 
 extern "C" void convoy_open_screen() {
     convoy_build_screen();
+    convoy_src_build_screen();
+    // Fresh entry: clear any loader state left behind by a previous visit that was
+    // exited mid-transition, else the busy flag would swallow every tap in here.
+    convoy_load_busy = false; convoy_pending_scr = NULL;
+    convoy_ready_scr = NULL;  convoy_apply_sel   = false;
+    convoy_settings_cb        = fw_open_picker;   // radar panel tap → source picker
+    convoy_src_on_scan        = fw_src_scan;
+    convoy_src_on_pick_device = fw_src_pick;
+    convoy_src_on_use_phone   = fw_src_phone;
+    convoy_src_on_back        = fw_src_back;
+    convoy_src_load_fn        = convoy_load_clean;   // clean AMOLED loads for the picker
     static lv_timer_t * ctmr = nullptr;
     if (!ctmr) ctmr = lv_timer_create(convoy_mock_tick, 200, NULL);
+    static lv_timer_t * ptmr = nullptr;
+    if (!ptmr) ptmr = lv_timer_create(convoy_picker_tick, 250, NULL);
     currentMode = MODE_UI;                 // treat as a normal UI screen
-    convoy_link_start();                   // (no-op while CONVOY_BLE_ENABLE == 0)
-    // Load exactly like the (known-good) Settings screen: plain fade, opaque
-    // backdrop provides full coverage. No force_full_ui_redraw / driver poking.
-    lv_scr_load_anim(convoy_screen, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
+
+    // Restore the last-used source; first-ever entry opens the picker.
+    Preferences p; p.begin("convoy", true);
+    int saved = p.getInt("source", 0);
+    String mac = p.getString("tbeam_mac", "");
+    p.end();
+    if (saved == 2) {
+        convoy_set_wait_text("Connect via browser", CONVOY_PHONE_URL);
+        convoy_src_sel = CVS_PHONE;
+    } else if (saved == 1 && mac.length() >= 17) {
+        strncpy(convoy_sel_mac, mac.c_str(), sizeof(convoy_sel_mac) - 1);
+        convoy_sel_mac[sizeof(convoy_sel_mac) - 1] = 0;
+        convoy_set_wait_text(NULL, NULL);
+        convoy_src_sel = CVS_MESH;
+    } else {
+        convoy_set_wait_text("No source selected", "Tap to choose");
+        convoy_src_sel = CVS_NONE;
+    }
+    convoy_set_self(0, 0, false);          // start on the waiting panel
+    convoy_link_start();                   // spawn the BLE task (acts on convoy_src_sel)
+
+    // First-ever entry (no source chosen) opens the picker; otherwise the radar.
+    if (convoy_src_sel == CVS_NONE)
+        convoy_load_clean(convoy_src_screen);
+    else
+        lv_scr_load_anim(convoy_screen, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
 }
