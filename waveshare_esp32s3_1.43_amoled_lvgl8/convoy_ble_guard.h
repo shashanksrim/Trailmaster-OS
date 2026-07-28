@@ -25,8 +25,21 @@
 
 static bool s_convoy_ble_up = false;
 
+// Bumped on every teardown. NimBLEDevice::deinit(true) destroys EVERY object the
+// stack owns — clients, services, characteristics — so any pointer cached across a
+// deinit dangles. Anyone caching one records the generation it came from and drops
+// it when this moves. This is needed because the roles tear down each OTHER's stack:
+// convoy_net_end() (phone) frees the NimBLEClient that convoy_link.h (mesh) still
+// holds in s_client, and convoy_net.h cannot see that static to null it. Switching
+// phone -> mesh then connected through freed memory: LoadProhibited in
+// NimBLEClient::connect. Intermittent, because it only bites when a mesh session ran
+// before the phone one.
+static uint32_t s_convoy_ble_gen = 0;
+
 // True only when the BLE stack is actually up and safe to call into.
 static inline bool convoy_ble_up(void) { return s_convoy_ble_up; }
+// Which incarnation of the stack is current; see s_convoy_ble_gen.
+static inline uint32_t convoy_ble_gen(void) { return s_convoy_ble_gen; }
 
 // Bring the stack up. Returns false (without crashing) if the controller can't
 // be initialised — caller must NOT make any further NimBLE calls.
@@ -49,6 +62,7 @@ static void convoy_ble_deinit(void) {
     if (!s_convoy_ble_up) return;
     NimBLEDevice::deinit(true);
     s_convoy_ble_up = false;
+    s_convoy_ble_gen++;      // everything the stack owned is now freed
 }
 
 #endif // CONVOY_BLE_GUARD_H

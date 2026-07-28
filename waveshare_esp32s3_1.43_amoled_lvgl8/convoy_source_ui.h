@@ -131,7 +131,15 @@ static lv_obj_t *cvsrc_page(const char *titletext) {
 
 // ── Build both pages (call once) ─────────────────────────────────────────────
 static lv_obj_t *convoy_src_build_screen(void) {
-    if (convoy_src_screen) return convoy_src_screen;
+    // Validity-checked, not just non-NULL — see convoy_build_screen(): an animated
+    // screen load with auto_del can delete a showing screen out from under us, and a
+    // cached pointer to a freed screen is worse than no cache. Both pages are
+    // rebuilt together so they can never end up from different generations.
+    if (convoy_src_screen && lv_obj_is_valid(convoy_src_screen)
+        && convoy_src_scan_screen && lv_obj_is_valid(convoy_src_scan_screen))
+        return convoy_src_screen;
+    convoy_src_screen = NULL; convoy_src_scan_screen = NULL;
+    for (int i = 0; i < CVSRC_MAX_DEV; i++) convoy_src_rows[i] = NULL;
 
     // Page 1 — source select
     convoy_src_screen = cvsrc_page("CONVOY SOURCE");

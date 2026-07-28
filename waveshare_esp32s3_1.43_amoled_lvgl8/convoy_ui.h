@@ -192,7 +192,13 @@ static void convoy_toggle_orientation(lv_event_t *e) {
 
 // ── Build the screen (call once) ────────────────────────────────────────────
 static lv_obj_t *convoy_build_screen(void) {
-    if (convoy_screen) return convoy_screen;
+    // Re-check validity, don't just trust the cached pointer: lv_scr_load_anim()'s
+    // auto_del path (lv_disp.c, `if(d->del_prev) lv_obj_del(act_scr)`) can delete
+    // whatever screen is showing when another animated load lands on top of it. If
+    // that was this screen, the cached pointer is freed and returning it hands out
+    // dangling memory forever. Rebuild instead.
+    if (convoy_screen && lv_obj_is_valid(convoy_screen)) return convoy_screen;
+    convoy_screen = NULL;
 
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_remove_style_all(scr);

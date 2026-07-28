@@ -73,6 +73,7 @@ static convoy_link_state_t s_link_state = CONVOY_LINK_IDLE;
 static NimBLEClient       *s_client   = nullptr;
 static NimBLERemoteCharacteristic *s_toradio = nullptr;
 static NimBLERemoteCharacteristic *s_fromradio = nullptr;
+static uint32_t            s_client_gen = 0;   // stack incarnation s_client came from
 static NimBLEAddress        s_target;
 static bool                 s_have_target = false;
 static volatile bool        s_drain_pending = false;
@@ -87,6 +88,17 @@ static uint32_t             s_last_poll_ms = 0;
 static const uint32_t CONVOY_HUES[6] = {
     0x00E5FF, 0x00E676, 0xFFD54F, 0xFF4081, 0xB388FF, 0xFF8A65
 };
+
+// Drop any NimBLE pointer left over from a previous incarnation of the stack. The
+// phone role's teardown (convoy_net_end) frees these without being able to null them
+// from here, so they must be checked before use — see convoy_ble_gen(). Idempotent.
+static inline void convoy_link_drop_stale(void) {
+    if (s_client_gen == convoy_ble_gen()) return;
+    s_client = nullptr; s_toradio = nullptr; s_fromradio = nullptr;
+    s_have_target = false; s_drain_pending = false;
+    s_link_state = CONVOY_LINK_IDLE;
+    s_client_gen = convoy_ble_gen();
+}
 
 // ── Tiny protobuf reader (only the fields we care about) ─────────────────────
 typedef struct { const uint8_t *p, *end; } pb_t;
@@ -285,6 +297,7 @@ static void convoy_start_scan(void) {
 // ── Public API ───────────────────────────────────────────────────────────────
 static bool convoy_link_begin(void) {
     if (!convoy_ble_init("Trailmaster")) return false;
+    convoy_link_drop_stale();                            // fresh stack: forget old pointers
     NimBLEDevice::setSecurityAuth(true, false, false);   // bond, no MITM (NO_PIN)
     NimBLEDevice::setMTU(517);                            // large reads for FromRadio
     Preferences p; p.begin("convoy", true);
@@ -312,6 +325,7 @@ static bool convoy_link_begin(void) {
 
 static void convoy_link_loop(void) {
     if (!convoy_ble_up()) return;
+    convoy_link_drop_stale();
     NimBLEScan *scan = NimBLEDevice::getScan();
     switch (s_link_state) {
         case CONVOY_LINK_IDLE:
@@ -358,6 +372,10 @@ static convoy_link_state_t convoy_link_status(void) { return s_link_state; }
 static bool convoy_link_begin_scan(void) {
     Serial.println("[CVY] scan-only begin");
     if (!convoy_ble_init("Trailmaster")) return false;
+    // Sync HERE, on a freshly built stack, and not from convoy_link_loop(): the task
+    // calls convoy_link_connect_mac() between this and the first loop pass, so a late
+    // drop would wipe the CONNECTING state that call just set and fall back to scanning.
+    convoy_link_drop_stale();
     NimBLEDevice::setSecurityAuth(true, false, false);
     NimBLEDevice::setMTU(517);
     s_have_target = false;
@@ -380,6 +398,7 @@ static void convoy_link_connect_mac(const char *mac) {
 // Restart scanning (stay central; no NimBLE re-init) — e.g. mesh → rescan.
 static void convoy_link_rescan(void) {
     if (!convoy_ble_up()) return;
+    convoy_link_drop_stale();          // s_client below may predate the current stack
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (scan && scan->isScanning()) scan->stop();
     if (s_client && s_client->isConnected()) s_client->disconnect();
@@ -395,7 +414,16 @@ static void convoy_link_end(void) {
     // Stop any active scan BEFORE deinit — deinit while scanning panics NimBLE.
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (scan && scan->isScanning()) scan->stop();
-    if (s_client && s_client->isConnected()) s_client->disconnect();
+    if (s_client && s_client->isConnected()) {
+        s_client->disconnect();
+        // disconnect() is ASYNCHRONOUS. Deinit'ing before the controller has actually
+        // dropped the link tears the stack down underneath a live connection — the
+        // log shows "ble_hs_stop: failed to terminate connection; rc=2" and the NEXT
+        // NimBLEDevice::createClient() then panics inside its constructor. Wait for
+        // the link to really be gone (~1s cap; it normally takes a few tens of ms).
+        for (int i = 0; i < 50 && s_client->isConnected(); i++) vTaskDelay(pdMS_TO_TICKS(20));
+        if (s_client->isConnected()) Serial.println("[CVY] WARN: link still up at deinit");
+    }
     convoy_ble_deinit();
     s_client = nullptr; s_toradio = nullptr; s_fromradio = nullptr;
     s_have_target = false; s_drain_pending = false;

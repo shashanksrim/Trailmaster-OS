@@ -148,9 +148,18 @@ static convoy_net_state_t convoy_net_status(void) {
 
 static void convoy_net_end(void) {
     if (!convoy_ble_up()) return;   // never came up (or already down)
-    if (s_net_server && s_net_connected) {
-        // best-effort disconnect of any peer, then free the stack
-        NimBLEDevice::stopAdvertising();
+    NimBLEDevice::stopAdvertising();
+    if (s_net_server && s_net_server->getConnectedCount() > 0) {
+        // Drop the phone link and WAIT for it. Same hazard as convoy_link_end():
+        // disconnect is asynchronous, and deinit'ing with a live connection tears the
+        // stack down under it ("ble_hs_stop: failed to terminate connection"), after
+        // which the next bring-up panics. Previously this only stopped advertising
+        // and never dropped the peer at all.
+        for (uint16_t h : s_net_server->getPeerDevices()) s_net_server->disconnect(h);
+        for (int i = 0; i < 50 && s_net_server->getConnectedCount() > 0; i++)
+            vTaskDelay(pdMS_TO_TICKS(20));
+        if (s_net_server->getConnectedCount() > 0)
+            Serial.println("[NET] WARN: phone still connected at deinit");
     }
     convoy_ble_deinit();
     s_net_server = nullptr; s_net_connected = false; s_net_last_rx = 0;
