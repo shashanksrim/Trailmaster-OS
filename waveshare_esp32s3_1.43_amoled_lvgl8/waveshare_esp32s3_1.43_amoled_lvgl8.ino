@@ -130,6 +130,7 @@ extern "C" {
 void switch_to_launcher();
 void force_full_ui_redraw(lv_obj_t * target_scr);
 void build_grid_launcher();
+static void convoy_cancel_loads(void);   // defined with the convoy loaders, used by loop()
 extern void pf_show_upload_overlay(void);
 extern bool pf_autostart_wifi;   // defined in PhotoFrameApp.cpp
 
@@ -1864,7 +1865,10 @@ void loop() {
             bool act_cvy  = (act_scr == convoy_screen ||
                              act_scr == convoy_src_screen ||
                              act_scr == convoy_src_scan_screen);
-            if (prev_cvy && !act_cvy) convoy_link_stop();
+            // Cancel pending loads BEFORE stopping the link: a load armed inside the
+            // Tracker would otherwise still fire (up to 4s later) and yank a rebuilt
+            // convoy screen back over the launcher.
+            if (prev_cvy && !act_cvy) { convoy_cancel_loads(); convoy_link_stop(); }
             prev_act_scr = act_scr;
             screen_load_time = millis();
         }
@@ -2027,11 +2031,35 @@ static volatile bool convoyRun = false;
 typedef enum { CVS_NONE, CVS_SCAN, CVS_MESH, CVS_PHONE } cvs_source_t;
 static volatile cvs_source_t convoy_src_sel = CVS_NONE;   // what the UI wants
 static volatile bool convoy_role_ready = false;           // task set: the role is up
+static volatile bool convoy_radio_failed = false;         // task set: BLE bring-up failed
 static char convoy_sel_mac[18] = {0};                     // chosen T-Beam MAC (mesh)
 static const char * CONVOY_PHONE_URL = "tinyurl.com/trailmstr";
 
+// SPIKE (2026-07-28): build_opt.h (flags-only file — NO comments allowed there,
+// it is a raw GCC response file) sets CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL,
+// which moves NimBLE *host* allocations to PSRAM instead of internal RAM. The
+// ESP-IDF BT *controller* buffers stay internal, hence the heap logging below.
+// If enough internal RAM stays free for WiFi, BLE and WiFi/OBD coexist and the
+// whole radio-handover handshake can be deleted.
+//
+// With that in place, try keeping WiFi UP. The handover below is the suspected
+// crash: convoyLinkTask
+// waits only 4s for the OBD worker's ack, then powers the WiFi stack down from
+// a DIFFERENT task — while that worker may still be blocked inside WiFi.begin()
+// (up to ~10s) or a socket read. Set to 0 to restore the old handover.
+// SPIKE RESULT (2026-07-28): 1 = FAILS. With WiFi/AP up the BT *controller*
+// cannot get its buffers: "BLE_INIT: Malloc failed / esp_bt_controller_init -4"
+// at 21-47KB free internal. PSRAM host alloc does not help — the failure is
+// controller-side. Left at 0; BLE and WiFi cannot coexist on this build.
+#define CONVOY_KEEP_WIFI 0
+
 static void convoyLinkTask(void * arg) {
     (void)arg;
+#if CONVOY_KEEP_WIFI
+    Serial.printf("[CVY] keep-WiFi spike: internal=%u psram=%u wifi_status=%d — BLE task up\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (int)WiFi.status());
+#else
     // ── Acquire the radio: pause OBD, wait for it to release WiFi, power WiFi
     // down (frees ~50KB internal RAM), THEN allow BLE. NimBLE must not init while
     // WiFi is still holding internal/DMA RAM.
@@ -2042,6 +2070,7 @@ static void convoyLinkTask(void * arg) {
     vTaskDelay(pdMS_TO_TICKS(300));
     Serial.printf("[CVY] WiFi off; internal RAM=%u — BLE task up\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
 
     cvs_source_t running = CVS_NONE;              // which BLE role is actually up
     while (convoyRun) {
@@ -2061,13 +2090,20 @@ static void convoyLinkTask(void * arg) {
                 // stack fully tear down AND the display's full-redraw DMA finish,
                 // so the new NimBLE init doesn't collide with either.
                 vTaskDelay(pdMS_TO_TICKS(400));
-                if (want == CVS_SCAN)       convoy_link_begin_scan();
-                else if (want == CVS_MESH)  { convoy_link_begin_scan(); convoy_link_connect_mac(convoy_sel_mac); }
-                else if (want == CVS_PHONE) convoy_net_begin();
+                // Bring-up can FAIL (BT controller out of internal RAM). Record it
+                // instead of ploughing on into NimBLE calls that would assert and
+                // reboot — the UI shows "Radio unavailable".
+                bool ok = true;
+                if (want == CVS_SCAN)       ok = convoy_link_begin_scan();
+                else if (want == CVS_MESH)  { ok = convoy_link_begin_scan(); if (ok) convoy_link_connect_mac(convoy_sel_mac); }
+                else if (want == CVS_PHONE) ok = convoy_net_begin();
+                convoy_radio_failed = !ok;
             }
             running = want;
-            convoy_role_ready = true;      // UI may now load the radar (init done)
-            Serial.printf("[CVY] role -> %d\n", (int)running);
+            convoy_role_ready = true;      // UI may now load the radar (init done or failed)
+            Serial.printf("[CVY] role -> %d  internal=%u psram=%u wifi_status=%d\n",
+                          (int)running, heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                          heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (int)WiFi.status());
         }
         if (running == CVS_SCAN || running == CVS_MESH) convoy_link_loop();
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -2076,8 +2112,9 @@ static void convoyLinkTask(void * arg) {
     else if (running == CVS_PHONE) convoy_net_end();
 
     // ── Release the radio back to WiFi/OBD (worker re-inits WiFi on its own).
-    convoy_radio_mode = false;
-    Serial.println("[CVY] radio released back to WiFi/OBD");
+    convoy_radio_mode = false;   // no-op under CONVOY_KEEP_WIFI (never set)
+    Serial.printf("[CVY] BLE task down; internal=%u wifi_status=%d\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (int)WiFi.status());
     convoyTaskHandle = NULL;
     vTaskDelete(NULL);
 }
@@ -2109,8 +2146,27 @@ static cvs_source_t convoy_pending_sel = CVS_NONE;
 static bool        convoy_apply_sel   = false;
 static bool        convoy_load_busy   = false;  // a load (either kind) is in flight
 static lv_obj_t *  convoy_ready_scr   = NULL;   // target of a wait-for-role load
+static lv_timer_t * convoy_defer_timer = NULL;  // in-flight convoy_load_clean
+static lv_timer_t * convoy_ready_timer = NULL;  // in-flight convoy_load_when_ready
+// Abandon any in-flight screen load. Both loaders are lv_timers that fire LATER —
+// the wait-for-role one up to 4s later — and then call lv_scr_load() on a convoy
+// screen. If the user has left the Tracker by then, that screen is no longer the
+// one on display and convoy_open_screen() rebuilds it on the next visit, so a late
+// fire dereferences a stale object: the LoadProhibited panic inside lv_obj_set_pos
+// when swiping down to the launcher. Cancel them on the way out.
+static void convoy_cancel_loads(void) {
+    if (convoy_defer_timer) { lv_timer_del(convoy_defer_timer); convoy_defer_timer = NULL; }
+    if (convoy_ready_timer) { lv_timer_del(convoy_ready_timer); convoy_ready_timer = NULL; }
+    convoy_pending_scr = NULL;
+    convoy_ready_scr   = NULL;
+    convoy_apply_sel   = false;
+    convoy_load_busy   = false;
+}
 static void convoy_deferred_load_cb(lv_timer_t * t) {
-    if (convoy_pending_scr) {
+    convoy_defer_timer = NULL;
+    // Guard the pointer as well as the timer: the screen can be rebuilt out from
+    // under a load that was armed before we got here.
+    if (convoy_pending_scr && lv_obj_is_valid(convoy_pending_scr)) {
         lv_scr_load(convoy_pending_scr);
         force_full_ui_redraw(convoy_pending_scr);
         convoy_pending_scr = NULL;
@@ -2127,7 +2183,7 @@ static void convoy_load_clean(lv_obj_t * scr) {
     if (convoy_load_busy || lv_scr_act() == scr) return;
     convoy_load_busy   = true;
     convoy_pending_scr = scr;
-    lv_timer_create(convoy_deferred_load_cb, 40, NULL);
+    convoy_defer_timer = lv_timer_create(convoy_deferred_load_cb, 40, NULL);
 }
 // Queue a source change to apply after the next clean load (macro avoids the
 // Arduino auto-prototype hoisting a cvs_source_t parameter above its typedef).
@@ -2142,10 +2198,13 @@ static uint32_t convoy_ready_t0 = 0;
 static void convoy_ready_load_cb(lv_timer_t * t) {
     if (!convoy_role_ready && millis() - convoy_ready_t0 <= 4000) return;
     lv_obj_t * scr = convoy_ready_scr ? convoy_ready_scr : convoy_screen;
-    convoy_ready_scr = NULL;
+    convoy_ready_scr   = NULL;
+    convoy_ready_timer = NULL;
     lv_timer_del(t);
-    lv_scr_load(scr);
-    force_full_ui_redraw(scr);
+    if (scr && lv_obj_is_valid(scr)) {
+        lv_scr_load(scr);
+        force_full_ui_redraw(scr);
+    }
     convoy_load_busy = false;
 }
 static void convoy_load_when_ready(lv_obj_t * scr) {
@@ -2154,16 +2213,26 @@ static void convoy_load_when_ready(lv_obj_t * scr) {
     convoy_load_busy = true;
     if (!running) {
         convoy_ready_t0 = millis();
-        lv_timer_create(convoy_ready_load_cb, 120, NULL);
+        convoy_ready_timer = lv_timer_create(convoy_ready_load_cb, 120, NULL);
     }
+}
+// Arm the radio. Opening the Tracker does NOT do this — entering the screen is
+// display-only, so no amount of sitting on the radar or the picker can touch the
+// radio (and BLE bring-up at 21KB free internal RAM was rebooting the board).
+// The BLE task is spawned ONLY here, from an explicit source choice.
+static void convoy_radio_arm(void) {
+    convoy_radio_failed = false;
+    convoy_link_start();               // no-op if the task is already running
 }
 // Start a BLE role switch NOW (picker still shown → display idle), then load the
 // radar once the role is up.
 static void convoy_select_source_mesh(void) {
+    convoy_radio_arm();
     convoy_role_ready = false; convoy_src_sel = CVS_MESH;
     convoy_load_when_ready(convoy_screen);
 }
 static void convoy_select_source_phone(void) {
+    convoy_radio_arm();
     convoy_role_ready = false; convoy_src_sel = CVS_PHONE;
     convoy_load_when_ready(convoy_screen);
 }
@@ -2173,6 +2242,7 @@ static int convoy_scan_rendered = -1;    // last device count rendered into the 
 
 static void fw_src_scan(void) {           // tapped MESHTASTIC → start scanning
     convoy_scan_rendered = -1;
+    convoy_radio_arm();                    // first explicit action that needs the radio
     convoy_switch_source(CVS_SCAN);        // applied after the scan page loads
 }
 static void fw_src_pick(int idx) {        // tapped a T-Beam → connect + persist
@@ -2250,6 +2320,28 @@ static void convoy_mock_tick(lv_timer_t * t) {
     // Runtime source: no top status pill (the waiting card carries the messaging
     // now). The BLE task's convoy_set_* data drives the radar; before a source
     // connects, convoy_self_fix is false so the tappable waiting panel shows.
+    // Radio bring-up failed (BT controller out of internal RAM): say so on the
+    // waiting panel instead of sitting on ACQUIRING forever. Tapping it reopens
+    // the picker, which retries.
+    // The radar only leaves the waiting panel once a position arrives, so a linked
+    // T-Beam sitting indoors (Meshtastic reports 0,0 = no fix) looked identical to
+    // "never connected". Report the link state separately from the fix state.
+    static const char * wait_shown = NULL;
+    const char * line = "Waiting for Mesh/Phone";
+    const char * cta  = "Tap to choose source";
+    if (convoy_radio_failed) {
+        line = "Radio unavailable";      cta = "Tap to retry";
+    } else if (convoy_src_sel == CVS_MESH && convoy_link_status() == CONVOY_LINK_ONLINE) {
+        line = "Mesh linked - no GPS fix"; cta = "T-Beam needs sky view";
+    } else if (convoy_src_sel == CVS_MESH) {
+        line = "Connecting to T-Beam";   cta = "Tap to change source";
+    } else if (convoy_src_sel == CVS_PHONE) {
+        line = "Connect via browser";    cta = CONVOY_PHONE_URL;
+    }
+    if (line != wait_shown) {            // only touch LVGL when the message changes
+        wait_shown = line;
+        convoy_set_wait_text(line, cta);
+    }
     convoy_set_status(NULL);
     convoy_refresh();
     return;
@@ -2301,24 +2393,29 @@ extern "C" void convoy_open_screen() {
     int saved = p.getInt("source", 0);
     String mac = p.getString("tbeam_mac", "");
     p.end();
+    // DISPLAY-ONLY ENTRY. We remember the last source but do NOT apply it and do
+    // NOT start the BLE task — opening the Tracker must touch no radio at all.
+    // (Auto-arming the phone role here is what rebooted the board with no user
+    // interaction: NimBLE init at ~21KB free internal RAM → controller malloc
+    // fails → assert → panic.) The radio arms only from an explicit card tap.
+    convoy_src_sel      = CVS_NONE;
+    convoy_role_ready   = false;
+    convoy_radio_failed = false;
     if (saved == 2) {
-        convoy_set_wait_text("Connect via browser", CONVOY_PHONE_URL);
-        convoy_src_sel = CVS_PHONE;
+        convoy_set_wait_text("Phone source saved", "Tap to connect");
     } else if (saved == 1 && mac.length() >= 17) {
         strncpy(convoy_sel_mac, mac.c_str(), sizeof(convoy_sel_mac) - 1);
         convoy_sel_mac[sizeof(convoy_sel_mac) - 1] = 0;
-        convoy_set_wait_text(NULL, NULL);
-        convoy_src_sel = CVS_MESH;
+        convoy_set_wait_text("Meshtastic source saved", "Tap to connect");
     } else {
         convoy_set_wait_text("No source selected", "Tap to choose");
-        convoy_src_sel = CVS_NONE;
     }
     convoy_set_self(0, 0, false);          // start on the waiting panel
-    convoy_link_start();                   // spawn the BLE task (acts on convoy_src_sel)
 
-    // First-ever entry (no source chosen) opens the picker; otherwise the radar.
-    if (convoy_src_sel == CVS_NONE)
-        convoy_load_clean(convoy_src_screen);
-    else
+    // First-ever entry opens the picker; with a remembered source show the radar
+    // (its waiting panel taps through to the picker to connect).
+    if (saved == 1 || saved == 2)
         lv_scr_load_anim(convoy_screen, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
+    else
+        convoy_load_clean(convoy_src_screen);
 }

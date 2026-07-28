@@ -279,7 +279,12 @@ static esp_err_t amoled_draw_bitmap(esp_lcd_panel_t *lcd_panel, int x_start, int
     }, 4), TAG, "send command failed");
     // transfer frame buffer
     size_t len = (x_end - x_start) * (y_end - y_start) * panel->fb_bits_per_pixel / 8;
-    tx_color(panel, io, LCD_CMD_RAMWR, color_data, len);
+    // Unlike the tx_param calls above, this return value used to be discarded and the
+    // function always reported ESP_OK — so a refused transfer looked like a successful
+    // flush and the panel silently kept stale pixels. That hid the full-frame overflow
+    // for a long time. Propagate it: callers can only react to what they are told.
+    ESP_RETURN_ON_ERROR(tx_color(panel, io, LCD_CMD_RAMWR, color_data, len), TAG,
+                        "send color failed (len=%u)", (unsigned)len);
 
     return ESP_OK;
 }

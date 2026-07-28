@@ -30,6 +30,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "convoy_ui.h"
+#include "convoy_ble_guard.h"   // convoy_ble_init/up/deinit — never crash on a failed radio
 
 // Custom 128-bit UUIDs (also referenced by docs/convoy/app.js — keep in sync).
 // 54524149="TRAI", 4d53="MS", 5452="TR".
@@ -112,14 +113,18 @@ static ConvoyNetChrCb s_net_chr_cb;
 static ConvoyNetSrvCb s_net_srv_cb;
 
 // ── Public API (mirrors convoy_link_begin/end/status) ────────────────────────
-static void convoy_net_begin(void) {
-    Serial.printf("[NET] init  internal RAM=%u\n", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    NimBLEDevice::init("Trailmaster");
+static bool convoy_net_begin(void) {
+    if (!convoy_ble_init("Trailmaster")) return false;
     NimBLEDevice::setSecurityAuth(true, false, false);   // bond, NO_PIN (Just Works)
     NimBLEDevice::setMTU(247);                            // room for a full roster
 
     s_net_server = NimBLEDevice::createServer();
-    s_net_server->setCallbacks(&s_net_srv_cb);
+    // The `false` is load-bearing: setCallbacks() defaults deleteCallbacks=true, so
+    // NimBLE would `delete` s_net_srv_cb — a STATIC — from ~NimBLEServer() during
+    // deinit. That asserts ("free() target pointer is outside heap areas") and
+    // reboots the board on any switch away from phone mode. Same reason
+    // convoy_link.h passes false to setScanCallbacks().
+    s_net_server->setCallbacks(&s_net_srv_cb, false);
     NimBLEService *svc = s_net_server->createService(CONVOY_NET_SVC);
     NimBLECharacteristic *chr = svc->createCharacteristic(
         CONVOY_NET_CHR, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
@@ -132,6 +137,7 @@ static void convoy_net_begin(void) {
     adv->enableScanResponse(true);
     adv->start();
     Serial.println("[NET] advertising as 'Trailmaster' — waiting for phone");
+    return true;
 }
 
 static convoy_net_state_t convoy_net_status(void) {
@@ -141,11 +147,12 @@ static convoy_net_state_t convoy_net_status(void) {
 }
 
 static void convoy_net_end(void) {
+    if (!convoy_ble_up()) return;   // never came up (or already down)
     if (s_net_server && s_net_connected) {
         // best-effort disconnect of any peer, then free the stack
         NimBLEDevice::stopAdvertising();
     }
-    NimBLEDevice::deinit(true);
+    convoy_ble_deinit();
     s_net_server = nullptr; s_net_connected = false; s_net_last_rx = 0;
     Serial.printf("[NET] stopped, BLE deinit (internal RAM=%u)\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));

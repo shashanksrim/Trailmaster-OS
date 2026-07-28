@@ -23,6 +23,7 @@
 #include <Preferences.h>
 #include <string>
 #include "convoy_ui.h"
+#include "convoy_ble_guard.h"   // convoy_ble_init/up/deinit — never crash on a failed radio
 
 #define CONVOY_AUTOBIND 0   // diagnostic: scan+log only, don't connect yet
 #define CONVOY_BENCH_MAC "a4:f0:0f:d8:c8:1a"  // bench: connect straight to C2
@@ -282,14 +283,10 @@ static void convoy_start_scan(void) {
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
-static void convoy_link_begin(void) {
-    Serial.printf("[CVY] pre-init  heap=%u internal=%u\n",
-                  esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    NimBLEDevice::init("Trailmaster");
+static bool convoy_link_begin(void) {
+    if (!convoy_ble_init("Trailmaster")) return false;
     NimBLEDevice::setSecurityAuth(true, false, false);   // bond, no MITM (NO_PIN)
     NimBLEDevice::setMTU(517);                            // large reads for FromRadio
-    Serial.printf("[CVY] post-init heap=%u internal=%u\n",
-                  esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     Preferences p; p.begin("convoy", true);
     String mac = p.getString("tbeam_mac", "");
     p.end();
@@ -310,9 +307,11 @@ static void convoy_link_begin(void) {
         Serial.println("[CVY] no bound MAC — will scan");
     }
 #endif
+    return true;
 }
 
 static void convoy_link_loop(void) {
+    if (!convoy_ble_up()) return;
     NimBLEScan *scan = NimBLEDevice::getScan();
     switch (s_link_state) {
         case CONVOY_LINK_IDLE:
@@ -356,19 +355,21 @@ static convoy_link_state_t convoy_link_status(void) { return s_link_state; }
 // ── Source-picker support ────────────────────────────────────────────────────
 // Scan-only bring-up: init the stack with no target so convoy_link_loop() just
 // scans and fills s_scan (read via convoy_link_scan_list). Used by the picker.
-static void convoy_link_begin_scan(void) {
+static bool convoy_link_begin_scan(void) {
     Serial.println("[CVY] scan-only begin");
-    NimBLEDevice::init("Trailmaster");
+    if (!convoy_ble_init("Trailmaster")) return false;
     NimBLEDevice::setSecurityAuth(true, false, false);
     NimBLEDevice::setMTU(517);
     s_have_target = false;
     s_scan_count  = 0;
     s_link_state  = CONVOY_LINK_IDLE;   // loop starts scanning
+    return true;
 }
 // Expose the current scan results (name/mac/rssi), newest snapshot. Returns count.
 static int convoy_link_scan_list(convoy_scan_dev_t **out) { *out = s_scan; return s_scan_count; }
 // Stop scanning and connect to a specific T-Beam MAC (from the picker).
 static void convoy_link_connect_mac(const char *mac) {
+    if (!convoy_ble_up()) return;
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (scan && scan->isScanning()) scan->stop();
     s_target = NimBLEAddress(std::string(mac), BLE_ADDR_PUBLIC);
@@ -378,6 +379,7 @@ static void convoy_link_connect_mac(const char *mac) {
 }
 // Restart scanning (stay central; no NimBLE re-init) — e.g. mesh → rescan.
 static void convoy_link_rescan(void) {
+    if (!convoy_ble_up()) return;
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (scan && scan->isScanning()) scan->stop();
     if (s_client && s_client->isConnected()) s_client->disconnect();
@@ -389,11 +391,12 @@ static void convoy_link_rescan(void) {
 // Tear the link down and free the BLE stack (called when leaving the Tracker so
 // the internal RAM goes back to WiFi/OBD).
 static void convoy_link_end(void) {
+    if (!convoy_ble_up()) return;   // never came up (or already down) — nothing to tear down
     // Stop any active scan BEFORE deinit — deinit while scanning panics NimBLE.
     NimBLEScan *scan = NimBLEDevice::getScan();
     if (scan && scan->isScanning()) scan->stop();
     if (s_client && s_client->isConnected()) s_client->disconnect();
-    NimBLEDevice::deinit(true);
+    convoy_ble_deinit();
     s_client = nullptr; s_toradio = nullptr; s_fromradio = nullptr;
     s_have_target = false; s_drain_pending = false;
     s_node_count = 0; s_my_num = 0;
