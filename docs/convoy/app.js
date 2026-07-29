@@ -7,7 +7,7 @@
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getDatabase, ref, set, remove, update, onValue,
+  getDatabase, ref, set, remove, update, onValue, get,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS } from "./config.js";
 
@@ -102,9 +102,13 @@ function boot() {
   $("sheet-grab").addEventListener("click", toggleSheet);
   $("sheet-head").addEventListener("click", toggleSheet);
   window.addEventListener("resize", () => { if (view === "radar") sizeRadar(); });
-  // BLE relay button only where Web Bluetooth exists (Chrome/Android, not iOS Safari).
-  if (navigator.bluetooth) $("btn-link").addEventListener("click", connectBoard);
-  else $("btn-link").classList.add("hidden");
+  // Connect a board. This lists boards over FIREBASE, not over the local network
+  // or Bluetooth, which is what makes it work on iOS: the board announces itself
+  // once it is on the hotspot, and picking it writes this convoy's room into its
+  // node. Bluetooth is offered inside the picker where it exists, as the legacy
+  // relay path.
+  $("btn-link").addEventListener("click", openBoardPicker);
+  $("boards-close").addEventListener("click", () => $("boards").classList.add("hidden"));
 
   if (new URLSearchParams(location.search).has("demo")) { startDemo(); return; }
 
@@ -521,6 +525,82 @@ async function pushBoard() {
     else await boardChar.writeValue(data);
   } catch (e) { /* transient BLE error — next tick retries */ }
 }
+// ── Board picker (Firebase-mediated pairing) ────────────────────────────────
+// A browser cannot discover or talk to the board over the LAN — the page is
+// HTTPS and the board is plain http on a private IP, which is hard-blocked as
+// mixed content, and a browser tab has no listening socket for the board to
+// connect back to. But both ends already speak to Firebase, so pairing goes
+// through there: the board publishes devices/<id>, we list the fresh ones, and
+// picking one writes this convoy's room into it.
+const BOARD_FRESH_MS = 120000;   // a board heartbeats every 2-10s; be generous
+
+async function openBoardPicker() {
+  const box = $("board-list");
+  $("boards").classList.remove("hidden");
+  box.textContent = "Looking for boards…";
+
+  if (!db || !me || !me.code) { box.textContent = "Join a convoy first."; return; }
+
+  let snap;
+  try { snap = await get(ref(db, "devices")); }
+  catch (e) { box.textContent = "Couldn't reach Firebase."; console.warn(e); return; }
+
+  const all = snap.val() || {};
+  const fresh = Object.entries(all)
+    .filter(([, d]) => d && d.ts && (now() - d.ts) < BOARD_FRESH_MS);
+
+  box.textContent = "";
+  if (!fresh.length) {
+    box.textContent = "No boards online. Turn on your hotspot and open the Tracker on the board.";
+  }
+  for (const [id, d] of fresh) {
+    const linked = d.room && normalizeCode(d.room) === me.code;
+    const row  = document.createElement("div"); row.className = "brow";
+    const info = document.createElement("div");
+    const nm   = document.createElement("b");     nm.textContent = d.name || id;
+    const st   = document.createElement("small");
+    st.textContent = linked ? "connected to this convoy"
+                            : d.room ? `in convoy ${d.room}` : "not connected";
+    info.append(nm, st);
+    const btn = document.createElement("button");
+    btn.className = "btn " + (linked ? "btn-outline" : "btn-orange");
+    btn.textContent = linked ? "Linked" : "Connect";
+    btn.disabled = !!linked;
+    btn.addEventListener("click", () => linkBoard(id, btn));
+    row.append(info, btn);
+    box.appendChild(row);
+  }
+
+  // Legacy Bluetooth relay, where the browser has it at all.
+  if (navigator.bluetooth) {
+    const row  = document.createElement("div"); row.className = "brow";
+    const info = document.createElement("div");
+    const nm   = document.createElement("b");     nm.textContent = "Bluetooth";
+    const st   = document.createElement("small"); st.textContent = "pair directly, no hotspot";
+    info.append(nm, st);
+    const btn = document.createElement("button");
+    btn.className = "btn btn-outline";
+    btn.textContent = "Pair";
+    btn.addEventListener("click", () => { $("boards").classList.add("hidden"); connectBoard(); });
+    row.append(info, btn);
+    box.appendChild(row);
+  }
+}
+
+async function linkBoard(id, btn) {
+  btn.disabled = true;
+  btn.textContent = "Linking…";
+  try {
+    await update(ref(db, `devices/${id}`), { room: me.code, callsign: me.callsign });
+    setBoardBtn(true);
+    $("boards").classList.add("hidden");
+  } catch (e) {
+    console.warn("link board:", e.message || e);
+    btn.disabled = false;
+    btn.textContent = "Retry";
+  }
+}
+
 async function connectBoard() {
   if (!navigator.bluetooth) return;
   try {
