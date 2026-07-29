@@ -11,6 +11,7 @@
 #include "esp_cache.h"
 #include <AnimatedGIF.h>
 #include "OTAManager.h"
+#include "convoy_cfg.h"   // convoy room code + callsign, edited from /convoy
 
 extern Amoled amoled;
 
@@ -65,8 +66,9 @@ const char index_html[] = R"rawliteral(
     </div>
     <div class="container">
         <div class="tabs">
-            <a href="/wifi" class="tab">Wi-Fi Settings</a>
-            <a href="/photos" class="tab active">Photo Sync</a>
+            <a href="/wifi" class="tab">Wi-Fi</a>
+            <a href="/photos" class="tab active">Photos</a>
+            <a href="/convoy" class="tab">Convoy</a>
         </div>
         <div class="card">
             <div class="warning-banner" id="macWarning">
@@ -1046,8 +1048,9 @@ void photoframe_setup() {
   </div>
   <div class="container">
       <div class="tabs">
-          <a href="/wifi" class="tab active">Wi-Fi Settings</a>
-          <a href="/photos" class="tab">Photo Sync</a>
+          <a href="/wifi" class="tab active">Wi-Fi</a>
+          <a href="/photos" class="tab">Photos</a>
+          <a href="/convoy" class="tab">Convoy</a>
       </div>
       <p>Add your home WiFi or phone hotspot. The device will connect automatically when you check for updates.</p>
       <div class='card'>
@@ -1068,6 +1071,81 @@ void photoframe_setup() {
   </div>
 </body></html>)rawliteral";
         photo_server.send(200, "text/html", page);
+    });
+
+    // ── Convoy settings ──────────────────────────────────────────────────────
+    // Which room to join and which member in it is this car. Typing these on a
+    // 1.43" round screen would be miserable, so they live here where the phone
+    // keyboard is — same trip the user already makes to add a WiFi network.
+    photo_server.on("/convoy", HTTP_GET, []() {
+        char room[CONVOY_CFG_ROOM_MAX] = {}, call[CONVOY_CFG_CALL_MAX] = {};
+        convoy_cfg_get_room(room, sizeof(room));
+        convoy_cfg_get_callsign(call, sizeof(call));
+
+        String page = R"rawliteral(
+<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Trailmaster Sync — Convoy</title>
+<style>
+  :root { --primary: #e67e22; --bg: #121212; --card: #1e1e1e; --text: #f5f5f5; }
+  body{margin:0;background:var(--bg);color:var(--text);font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;display:flex;flex-direction:column;align-items:center;padding:0;}
+  .header { background: #000; width: 100%; padding: 20px 0; text-align: center; border-bottom: 3px solid var(--primary); margin-bottom: 20px; }
+  .header h1 { margin: 0; font-size: 24px; letter-spacing: 2px; text-transform: uppercase; display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .container { padding: 0 20px 20px 20px; width: 100%; max-width: 440px; box-sizing: border-box; }
+  .tabs { display: flex; background: #1a1a1a; margin-bottom: 20px; border-radius: 8px; overflow: hidden; }
+  .tab { flex: 1; text-align: center; padding: 12px; color: #888; text-decoration: none; font-weight: bold; font-size: 14px; transition: 0.3s; }
+  .tab.active { background: var(--primary); color: #fff; }
+  .tab:hover:not(.active) { background: #333; color: #fff; }
+  p{color:#aaa;font-size:14px;margin:0 0 20px;text-align:center;}
+  .card{background:var(--card);border-radius:12px;padding:25px;width:100%;box-shadow: 0 8px 16px rgba(0,0,0,0.5);box-sizing:border-box;margin-bottom:20px;}
+  .card h2{font-size:16px;color:var(--primary);margin:0 0 14px;text-align:left;}
+  label{display:block;text-align:left;color:#bbb;font-size:13px;margin-bottom:6px;}
+  .hint{color:#777;font-size:12px;margin:-8px 0 16px;text-align:left;}
+  input{width:100%;box-sizing:border-box;background:#111;border:1px solid #444;color:#eee;padding:12px;border-radius:8px;font-size:16px;margin-bottom:8px;text-transform:uppercase;}
+  button.primary{width:100%;background:var(--primary);color:#fff;border:none;padding:15px;border-radius:8px;font-size:16px;font-weight:bold;text-transform:uppercase;cursor:pointer;transition:0.3s;}
+  button.primary:hover{background:#d35400;}
+</style></head><body>
+  <div class="header">
+      <h1>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+          TRAILMASTER
+      </h1>
+  </div>
+  <div class="container">
+      <div class="tabs">
+          <a href="/wifi" class="tab">Wi-Fi</a>
+          <a href="/photos" class="tab">Photos</a>
+          <a href="/convoy" class="tab active">Convoy</a>
+      </div>
+      <p>Join the same convoy your phone is in, so the Tracker can show the other cars.</p>
+      <div class='card'>
+        <h2>Convoy Room</h2>
+        <form method='POST' action='/convoy/save'>
+          <label>Room code</label>
+          <input type='text' name='room' maxlength='15' placeholder='e.g. AENP' value=')rawliteral";
+        page += String(room);
+        page += R"rawliteral('>
+          <div class='hint'>The code shown in the Convoy app. The "TM-" prefix is optional.</div>
+          <label>This car's callsign</label>
+          <input type='text' name='call' maxlength='11' placeholder='e.g. TM1' value=')rawliteral";
+        page += String(call);
+        page += R"rawliteral('>
+          <div class='hint'>Must match your own callsign in the app &mdash; that entry is what puts this car on the radar. Everyone else shows as another car.</div>
+          <button class='primary' type='submit'>Save to Device</button>
+        </form>
+      </div>
+  </div>
+</body></html>)rawliteral";
+        photo_server.send(200, "text/html", page);
+    });
+
+    photo_server.on("/convoy/save", HTTP_POST, []() {
+        String room = photo_server.arg("room");
+        String call = photo_server.arg("call");
+        convoy_cfg_set(room.c_str(), call.c_str());
+        Serial.printf("[CVY] config saved: room='%s' callsign='%s'\n",
+                      room.c_str(), call.c_str());
+        photo_server.sendHeader("Location", "/convoy");
+        photo_server.send(303);
     });
 
     photo_server.on("/wifi/add", HTTP_POST, []() {

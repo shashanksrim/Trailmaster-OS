@@ -20,6 +20,7 @@
 #include "convoy_ui.h"   // shared convoy/tracker radar (same header the sim renders)
 #include "convoy_link.h" // BLE client to the co-located Meshtastic T-Beam (NimBLE 2.x)
 #include "convoy_net.h"  // BLE peripheral: phone (Web Bluetooth) pushes the convoy roster
+#include "convoy_wifi.h" // WiFi STA: board pulls the roster from Firebase itself
 #include "convoy_source_ui.h" // source picker: choose Meshtastic (scan) or phone at runtime
 #include "PhotoFrameApp.h"
 #include "NesEngine.h"
@@ -91,6 +92,12 @@ bool tracker_enabled = true; // Settings toggle: show the Convoy Tracker launche
 // watches convoy_radio_mode and releases WiFi; convoy_obd_released acks it.
 volatile bool convoy_radio_mode = false;
 volatile bool convoy_obd_released = false;
+// ...except for the WiFi convoy source, which wants the WiFi STACK, not the raw
+// radio: it joins the owner's hotspot itself. Set alongside convoy_radio_mode to
+// tell the worker "stop touching WiFi" WITHOUT powering it down — no NimBLE is
+// coming, so the internal-RAM cliff that WIFI_OFF exists to dodge doesn't apply,
+// and a needless down/up would just cost seconds. See CONVOY_WIFI_PLAN.md.
+volatile bool convoy_wifi_mode = false;
 lv_obj_t * sel_bar = NULL;
 lv_obj_t * grid_container = NULL;
 
@@ -184,9 +191,12 @@ void obdBackgroundWorker(void *pvParameters) {
                 if (client.connected()) { client.stop(); }
                 WiFi.disconnect(true, true);
                 if (wifi_ap_running) { WiFi.softAPdisconnect(true); }
-                WiFi.mode(WIFI_OFF);
-                vTaskDelay(pdMS_TO_TICKS(200));   // let the stack settle before NimBLE
-                Serial.printf("[OBD] WiFi released for Tracker (internal RAM=%u)\n",
+                if (!convoy_wifi_mode) {
+                    WiFi.mode(WIFI_OFF);
+                    vTaskDelay(pdMS_TO_TICKS(200));   // let the stack settle before NimBLE
+                }
+                Serial.printf("[OBD] WiFi released for Tracker%s (internal RAM=%u)\n",
+                              convoy_wifi_mode ? " (STA kept up)" : "",
                               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                 convoy_obd_released = true;       // ack: the radio is genuinely free
             }
@@ -2078,8 +2088,49 @@ static const char * CONVOY_PHONE_URL = "tinyurl.com/trailmstr";
 // controller-side. Left at 0; BLE and WiFi cannot coexist on this build.
 #define CONVOY_KEEP_WIFI 0
 
+// Phase 1 (CONVOY_WIFI_PLAN.md). 1 = the Tracker does NOT bring up BLE at all:
+// it takes WiFi instead, joins a saved hotspot and streams the convoy roster
+// from Firebase for as long as the Tracker is open. Set back to 0 for the BLE
+// sources (mesh / phone relay), which cannot run at the same time — the BT
+// controller cannot get its buffers with the WiFi stack up.
+//
+// Still a compile-time switch rather than a picker entry: Phase 2 adds CVS_CLOUD
+// to convoy_source_ui.h once this path has run on the road.
+// The room is not compiled in: an unlinked board announces itself to Firebase
+// and waits to be picked in the convoy app's Connect list.
+#define CONVOY_WIFI_SPIKE 1
+
 static void convoyLinkTask(void * arg) {
     (void)arg;
+#if CONVOY_WIFI_SPIKE
+    // Same ownership rule as the BLE path: ASK the OBD worker, never touch WiFi
+    // from here until it acks. convoy_wifi_mode makes that ack mean "I've let go
+    // of WiFi" instead of "WiFi is powered down".
+    convoy_wifi_mode  = true;
+    convoy_radio_mode = true;
+    const uint32_t cvw_deadline = millis() + 12000;   // > the worker's ~10s connect
+    while (!convoy_obd_released && millis() < cvw_deadline) vTaskDelay(pdMS_TO_TICKS(50));
+    if (!convoy_obd_released) {
+        Serial.println("[CVW] WiFi handover NOT acked — leaving the radio to OBD");
+        convoy_radio_failed = true;
+        convoy_role_ready   = true;
+    } else {
+        const bool ok = convoy_wifi_begin();
+        convoy_radio_failed = !ok;
+        convoy_role_ready   = true;   // UI may load the radar (up, or failed)
+        while (convoyRun && ok) {
+            convoy_wifi_loop();
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        convoy_wifi_end();
+    }
+    convoy_radio_mode = false;     // hand the radio back to OBD
+    convoy_wifi_mode  = false;
+    convoyRun         = false;
+    convoyTaskHandle  = NULL;
+    vTaskDelete(NULL);
+    return;
+#endif
 #if CONVOY_KEEP_WIFI
     Serial.printf("[CVY] keep-WiFi spike: internal=%u psram=%u wifi_status=%d — BLE task up\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -2427,6 +2478,15 @@ static void convoy_mock_tick(lv_timer_t * t) {
     cvs_source_t eff = (convoy_src_sel != CVS_NONE) ? convoy_src_sel : convoy_autoarm_sel;
     if (convoy_radio_failed) {
         line = "Radio unavailable";      cta = "Tap to retry";
+#if CONVOY_WIFI_SPIKE
+    } else if (convoy_wifi_status() == CONVOY_WIFI_NO_NET) {
+        line = "No Wi-Fi saved";         cta = "Settings > Wi-Fi to add one";
+    } else if (convoy_wifi_status() == CONVOY_WIFI_UNPAIRED) {
+        // Name the board so the user knows which entry to tap in the app's list.
+        line = "Tap Connect in the app";  cta = convoy_wifi_device_name();
+    } else if (convoy_wifi_status() == CONVOY_WIFI_WAITING) {
+        line = "Linked - waiting for cars"; cta = CONVOY_PHONE_URL;
+#endif
     } else if (eff == CVS_MESH && convoy_link_status() == CONVOY_LINK_ONLINE) {
         line = "Mesh linked - no GPS fix"; cta = "T-Beam needs sky view";
     } else if (eff == CVS_MESH) {

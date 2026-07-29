@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 // Compare dotted version strings like "3.0" < "3.1".
 // Returns true if `remote` is a newer version than `current`.
@@ -15,6 +16,26 @@ static inline bool version_is_newer(const char* remote, const char* current) {
     sscanf(remote,  "%d.%d", &rMaj, &rMin);
     sscanf(current, "%d.%d", &cMaj, &cMin);
     return (rMaj > cMaj) || (rMaj == cMaj && rMin > cMin);
+}
+
+// Tiny JSON number-field extractor: finds  "key": <number>  and parses it.
+// Doubles, not floats: Firebase timestamps are ms since epoch (~1.7e12), which
+// overflows int32 and loses precision in a float. Returns false if the key is
+// absent or its value is not a number (e.g. null, which RTDB uses for a member
+// that has not reported a position yet).
+static inline bool json_get_num(const char* json, const char* key, double* out) {
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* p = strstr(json, pat);
+    if (!p) return false;
+    p += strlen(pat);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '-' && *p != '+' && *p != '.' && (*p < '0' || *p > '9')) return false;
+    char* end = nullptr;
+    double v = strtod(p, &end);
+    if (end == p) return false;
+    *out = v;
+    return true;
 }
 
 // Tiny JSON string-field extractor: finds  "key": "value"  and copies value.

@@ -33,6 +33,13 @@ void ota_add_network(const char* ssid, const char* password);
 void ota_remove_network(const char* ssid);
 int  ota_list_networks(char ssids[][33], int max_count); // returns count
 
+// Join the first reachable saved network in pure STA mode. Same tested path the
+// updater uses, minus the set_status() calls — so a caller that just needs WiFi
+// (convoy) does not make the OTA overlay announce a fake update check. Skips the
+// diagnostic scan too, which costs seconds and only ever fed a log line.
+// The caller must already own the radio (see convoy_radio_mode in the .ino).
+bool ota_wifi_connect_saved();
+
 // Starts check+install flow on a background FreeRTOS task.
 // If an update is found, state becomes OTA_UPDATE_AVAILABLE.
 // Call ota_install() from the UI to proceed with download.
