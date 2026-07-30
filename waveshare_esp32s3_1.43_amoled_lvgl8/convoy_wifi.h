@@ -62,6 +62,17 @@
 #define CONVOY_WIFI_PAIR_FAST_MS 2000
 #define CONVOY_WIFI_PAIR_SLOW_MS 10000
 
+// How long after entering the Tracker the board stays listed and assignable.
+//
+// SECURITY: devices/<id> must be world-readable for the app to list boards, and
+// world-writable for it to assign a room — there is no auth to scope it to an
+// owner. A board that announced itself forever would be a public, permanently
+// re-pointable registry entry. Bounding it to a few minutes means the node only
+// exists while someone is deliberately pairing, so a drive-by write to an idle
+// board lands on nothing. Re-pointing at a new convoy still works — reopening
+// the Tracker starts a fresh window.
+#define CONVOY_WIFI_PAIR_WINDOW_MS 180000   // 3 minutes
+
 // Fallback palette, used only for a member the web app gave no colour.
 static const uint32_t CONVOY_WIFI_HUES[6] = {
     0x00E5FF, 0x00E676, 0xFFD54F, 0xFF4081, 0xB388FF, 0xFF8A65
@@ -79,6 +90,8 @@ static bool     s_cvw_begun    = false;   // HTTPClient has a live begin()
 static uint32_t s_cvw_last_rx  = 0;
 static uint32_t s_cvw_next_poll = 0;
 static uint32_t s_cvw_next_pair = 0;
+static uint32_t s_cvw_pair_until = 0;     // window closes at this millis()
+static bool     s_cvw_announced  = false; // devices/<id> currently published
 static char     s_cvw_url[224];
 static char     s_cvw_pair_url[224];
 // Stable per-board identity, derived from the eFuse MAC. The web app lists these
@@ -178,7 +191,7 @@ static void convoy_wifi_pair_tick(void) {
     char body[160];
     snprintf(body, sizeof(body),
              "{\"name\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}", s_cvw_dev_name);
-    cvw_request(s_cvw_pair_url, "PATCH", body, nullptr);
+    if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
 
     // Read the node back: has the app assigned us a room?
     String node;
@@ -204,10 +217,25 @@ static void convoy_wifi_pair_tick(void) {
     Serial.printf("[CVW] linked by app: room=%s self=%s\n", s_cvw_room, s_cvw_call);
 }
 
+// Withdraw from the board list. Called when the pairing window closes and when
+// leaving the Tracker, so an idle board is not sitting in a public, writable
+// registry for anyone to re-point.
+static void convoy_wifi_unannounce(void) {
+    if (!s_cvw_announced) return;
+    s_cvw_announced = false;
+    cvw_request(s_cvw_pair_url, "DELETE", nullptr, nullptr);
+    Serial.println("[CVW] pairing window closed — withdrawn from the board list");
+}
+
 // ── Public API (mirrors convoy_net_begin/loop/status/end) ────────────────────
 // Shown on the Tracker's waiting panel so the user knows which entry in the
 // app's board list is this board.
 static const char * convoy_wifi_device_name(void) { return s_cvw_dev_name; }
+
+// True while this board is still listed and will accept a room assignment.
+static bool convoy_wifi_pairing_open(void) {
+    return s_cvw_joined && (int32_t)(millis() - s_cvw_pair_until) < 0;
+}
 static bool convoy_wifi_begin(void) {
     s_cvw_joined = s_cvw_begun = false;
     s_cvw_last_rx = 0;
@@ -239,6 +267,8 @@ static bool convoy_wifi_begin(void) {
     s_cvw_http.setReuse(true);
     s_cvw_http.setTimeout(8000);
     s_cvw_begun = true;                  // cvw_request() owns begin()/end() now
+    s_cvw_announced  = false;
+    s_cvw_pair_until = millis() + CONVOY_WIFI_PAIR_WINDOW_MS;
 
     Serial.printf("[CVW] joined '%s' rssi=%d ip=%s as '%s' room=%s self=%s internal=%u\n",
                   WiFi.SSID().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(),
@@ -259,12 +289,17 @@ static void convoy_wifi_loop(void) {
         return;
     }
 
-    // Announce / check for an assignment. Fast while unlinked because the user
-    // is watching the app for this board to appear; lazy afterwards.
-    if ((int32_t)(now - s_cvw_next_pair) >= 0) {
-        s_cvw_next_pair = now + (s_cvw_room[0] ? CONVOY_WIFI_PAIR_SLOW_MS
-                                               : CONVOY_WIFI_PAIR_FAST_MS);
-        convoy_wifi_pair_tick();
+    // Announce / check for an assignment, but only inside the pairing window.
+    // Fast while unlinked because the user is watching the app for this board to
+    // appear; lazy afterwards, when it only needs to catch a re-point.
+    if ((int32_t)(now - s_cvw_pair_until) < 0) {
+        if ((int32_t)(now - s_cvw_next_pair) >= 0) {
+            s_cvw_next_pair = now + (s_cvw_room[0] ? CONVOY_WIFI_PAIR_SLOW_MS
+                                                   : CONVOY_WIFI_PAIR_FAST_MS);
+            convoy_wifi_pair_tick();
+        }
+    } else {
+        convoy_wifi_unannounce();       // no-op once already withdrawn
     }
 
     if (!s_cvw_room[0]) return;         // nothing to poll until we are linked
@@ -285,6 +320,9 @@ static convoy_wifi_state_t convoy_wifi_status(void) {
 }
 
 static void convoy_wifi_end(void) {
+    // Withdraw BEFORE the socket goes: leaving the Tracker should take the board
+    // out of the public list immediately, not leave it there until it ages out.
+    if (s_cvw_joined && WiFi.status() == WL_CONNECTED) convoy_wifi_unannounce();
     if (s_cvw_begun) { s_cvw_http.end(); s_cvw_begun = false; }
     if (s_cvw_joined) {
         // Leave the radio powered: the OBD worker owns WiFi and re-inits it on

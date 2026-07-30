@@ -2483,7 +2483,13 @@ static void convoy_mock_tick(lv_timer_t * t) {
         line = "No Wi-Fi saved";         cta = "Settings > Wi-Fi to add one";
     } else if (convoy_wifi_status() == CONVOY_WIFI_UNPAIRED) {
         // Name the board so the user knows which entry to tap in the app's list.
-        line = "Tap Connect in the app";  cta = convoy_wifi_device_name();
+        // Once the pairing window closes the board is no longer listed, so say
+        // that rather than pointing at a Connect button that cannot find it.
+        if (convoy_wifi_pairing_open()) {
+            line = "Tap Connect in the app"; cta = convoy_wifi_device_name();
+        } else {
+            line = "Pairing closed";         cta = "Reopen Tracker to link";
+        }
     } else if (convoy_wifi_status() == CONVOY_WIFI_WAITING) {
         line = "Linked - waiting for cars"; cta = CONVOY_PHONE_URL;
 #endif
