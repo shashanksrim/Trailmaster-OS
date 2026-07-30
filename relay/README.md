@@ -75,10 +75,27 @@ Traccar version's payload shape if the format ever changes.
   its own member under a random id, so you would appear twice — once from
   Traccar, once from the browser. Use the web app as a viewer only, or test with
   a different callsign.
-- **Speed units differ by protocol.** Traccar's OsmAnd query protocol sends
-  knots; the JSON payloads send m/s. The Worker normalises to m/s, which is what
-  the board's movement threshold expects. Getting this wrong makes a parked car
-  look like it is doing 15 km/h.
+- **What Traccar Client actually sends**, captured from a real phone, is the
+  OsmAnd fields **form-encoded in the POST body** — not query parameters, not
+  JSON:
+
+  ```
+  id=TM1&lat=12.936833&lon=77.6992084&timestamp=1785430293&accuracy=68.5&batt=47
+  ```
+
+  The Worker also accepts query parameters and the nested JSON payload
+  (`{device_id, location:{coords:{...}}}`) that newer builds and Home Assistant
+  document, since which one you get depends on version.
+- **Speed units differ by format.** The OsmAnd fields send knots; the nested JSON
+  sends m/s. The Worker normalises to m/s, which is what the board's movement
+  threshold expects. Getting this wrong makes a parked car look like it is doing
+  15 km/h.
+- **Timestamps come in three shapes**: epoch seconds, epoch milliseconds, and ISO
+  8601. `parseFloat("2026-07-30T07:32:51Z")` returns `2013`, which becomes a 1970
+  date and marks the member permanently offline — so they are parsed explicitly.
+- **Deploys take a few seconds to propagate.** A request immediately after
+  `wrangler deploy` can still hit the old version, which looks exactly like the
+  fix not working.
 - **Timestamps come from the device, not arrival time.** Traccar buffers fixes
   while offline and replays them later; using arrival time would make a whole
   backlog look freshly current.

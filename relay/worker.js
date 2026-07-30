@@ -61,35 +61,72 @@ function dig(obj, paths) {
   return null;
 }
 
-function extract(url, body) {
+// Timestamps arrive in three different shapes depending on protocol and
+// version: epoch seconds, epoch milliseconds, or an ISO 8601 string. parseFloat
+// on "2013-09-17T07:32:51Z" quietly returns 2013 — which becomes a 1970 date and
+// marks the member permanently offline — so this has to be handled explicitly.
+function parseTs(v) {
+  if (v == null) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v < 1e11 ? v * 1000 : v;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) { const n = Number(s); return n < 1e11 ? n * 1000 : n; }
+  // ISO 8601, or Traccar's "yyyy-MM-dd HH:mm:ss" which needs the T to parse.
+  let d = Date.parse(s);
+  if (!Number.isFinite(d)) d = Date.parse(s.replace(" ", "T") + (/[Zz+]/.test(s) ? "" : "Z"));
+  return Number.isFinite(d) ? d : null;
+}
+
+// `form` carries a form-encoded POST body. Traccar Client actually sends the
+// OsmAnd fields that way — not as query parameters and not as JSON, which is the
+// one combination the first version of this Worker did not try:
+//   id=TM1&lat=12.93&lon=77.69&timestamp=1785430293&accuracy=68.5&batt=47
+// Same field names and same units as the query protocol, so they are handled as
+// one path rather than duplicated.
+function extract(url, body, form) {
   const q = url.searchParams;
-  const fromQuery = q.has("lat") || q.has("latitude");
+  const get = (k) => q.get(k) ?? (form ? form.get(k) : null);
+  // "OsmAnd style" means these flat field names, whether they arrived in the
+  // query string or the body — as opposed to the nested JSON payload.
+  const osmand = get("lat") !== null || get("latitude") !== null;
+  const b = body || {};
 
-  const id = q.get("id") || q.get("deviceid") ||
-             (body && (body.device_id || body.deviceId || body.id)) || null;
+  const id = get("id") || get("deviceid") ||
+             b.device_id || b.deviceId || b.deviceid || b.id || null;
 
-  const lat = fromQuery ? num(q.get("lat") ?? q.get("latitude"))
-                        : dig(body || {}, ["lat", "latitude", "location.coords.latitude", "coords.latitude"]);
-  const lon = fromQuery ? num(q.get("lon") ?? q.get("longitude"))
-                        : dig(body || {}, ["lon", "longitude", "location.coords.longitude", "coords.longitude"]);
+  let lat = osmand ? num(get("lat") ?? get("latitude"))
+                   : dig(b, ["lat", "latitude", "location.coords.latitude", "coords.latitude"]);
+  let lon = osmand ? num(get("lon") ?? get("longitude"))
+                   : dig(b, ["lon", "longitude", "location.coords.longitude", "coords.longitude"]);
 
-  let speed = fromQuery ? num(q.get("speed"))
-                        : dig(body || {}, ["speed", "location.coords.speed", "coords.speed"]);
-  // The OsmAnd query protocol reports speed in KNOTS; the JSON payloads report
+  // Some versions send location as a single "lat,lon" string rather than a pair
+  // of numbers.
+  if (lat === null || lon === null) {
+    const loc = get("location") ?? (typeof b.location === "string" ? b.location : null);
+    if (loc && loc.includes(",")) {
+      const [a, c] = loc.split(",");
+      if (lat === null) lat = num(a);
+      if (lon === null) lon = num(c);
+    }
+  }
+
+  let speed = osmand ? num(get("speed"))
+                     : dig(b, ["speed", "location.coords.speed", "coords.speed"]);
+  // The OsmAnd fields report speed in KNOTS; the nested JSON payload reports
   // m/s. The board's "is it moving" threshold is in m/s, so normalise here —
   // getting this wrong makes a parked car look like it is doing 15 km/h.
-  if (speed !== null && fromQuery) speed = speed * 0.514444;
+  if (speed !== null && osmand) speed = speed * 0.514444;
 
-  const heading = fromQuery ? num(q.get("bearing") ?? q.get("heading"))
-                            : dig(body || {}, ["bearing", "heading", "location.coords.heading", "coords.heading"]);
+  const heading = osmand ? num(get("bearing") ?? get("heading"))
+                         : dig(b, ["bearing", "heading", "location.coords.heading", "coords.heading"]);
 
-  // Traccar buffers fixes while offline and sends them later, so prefer the
-  // device's own timestamp over arrival time — otherwise a replayed backlog
-  // would all look freshly current. Seconds → ms.
-  let ts = fromQuery ? num(q.get("timestamp"))
-                     : dig(body || {}, ["timestamp", "location.timestamp", "tst"]);
-  if (ts !== null && ts < 1e11) ts = ts * 1000;      // seconds, not ms
-  if (ts === null || !Number.isFinite(ts)) ts = Date.now();
+  // Traccar buffers fixes while offline and replays them later, so prefer the
+  // device's own timestamp over arrival time — otherwise a whole backlog would
+  // look freshly current.
+  const rawTs = osmand
+    ? get("timestamp")
+    : (b.timestamp ?? b?.location?.timestamp ?? b.tst ?? null);
+  const ts = parseTs(rawTs) ?? Date.now();
 
   return { id, lat, lon, speed, heading, ts };
 }
@@ -113,19 +150,34 @@ export default {
       return new Response("forbidden\n", { status: 403 });
     }
 
-    let body = null;
+    let body = null, form = null, raw = "";
     if (request.method === "POST" || request.method === "PUT") {
-      const text = await request.text();
-      try { body = JSON.parse(text); } catch { body = null; }
-      // Keep the raw text around for ?debug — the first real request from a new
-      // Traccar version is the cheapest way to learn its actual payload shape.
+      raw = await request.text();
+      try { body = JSON.parse(raw); } catch { body = null; }
+      // Not JSON? Traccar Client sends form-encoded OsmAnd fields in the body.
+      if (body === null && raw.includes("=")) form = new URLSearchParams(raw);
+      // ?debug echoes the raw payload — the cheapest way to learn a new Traccar
+      // version's shape without guessing.
       if (url.searchParams.has("debug")) {
-        return new Response(JSON.stringify({ method: request.method, raw: text, parsed: body }, null, 2),
+        return new Response(JSON.stringify({ method: request.method, raw, parsed: body }, null, 2),
                             { headers: { "content-type": "application/json" } });
       }
     }
 
-    const f = extract(url, body);
+    const f = extract(url, body, form);
+
+    // Traccar's client reports only "upload failed" with no detail, so a payload
+    // we cannot read is invisible from both ends. Log the raw body whenever
+    // anything is missing — `wrangler tail` then shows exactly what arrived and
+    // which field we failed to find, instead of leaving it to guesswork.
+    if (!f.id || f.lat === null || f.lon === null) {
+      console.log("INCOMPLETE", JSON.stringify({
+        method: request.method,
+        got: { id: f.id, lat: f.lat, lon: f.lon },
+        parsedJson: body !== null,
+        raw: raw.slice(0, 800),
+      }));
+    }
 
     if (!f.id) return new Response("missing device id\n", { status: 400 });
     if (f.lat === null || f.lon === null) {
