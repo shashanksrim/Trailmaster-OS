@@ -203,6 +203,7 @@ function startDemo() {
 function leave() {
   if (demoTimer) { clearInterval(demoTimer); demoTimer = null; }
   if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  releaseWakeLock();          // let the screen sleep again once we are out
   if (unsub) { unsub(); unsub = null; }
   if (myRef) { remove(myRef); }
   for (const k in markers) { map.removeLayer(markers[k]); }
@@ -219,8 +220,44 @@ function leave() {
   $("join").classList.remove("hidden");
 }
 
+// ── Screen wake lock ─────────────────────────────────────────────────────────
+// A backgrounded or locked phone stops running this page, which stops
+// watchPosition, which is exactly what happens on a drive. There is no way to
+// keep a web page feeding GPS with the screen off -- service workers cannot
+// reach navigator.geolocation, and iOS suspends the tab outright -- so the one
+// thing we CAN do is stop the screen turning itself off while a convoy is
+// running. The phone is dash-mounted and charging anyway.
+//
+// The lock is released by the browser whenever the page is hidden, and is NOT
+// restored automatically, so it has to be re-acquired on visibilitychange.
+// Secure-context only; works on Chrome/Android and Safari 16.4+.
+let wakeLock = null, wantWakeLock = false;
+
+async function acquireWakeLock() {
+  if (!wantWakeLock || !("wakeLock" in navigator) || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+  } catch (e) {
+    // Denied (low battery, or no permission). Not fatal -- the convoy still
+    // works while the screen happens to be on.
+    console.warn("wake lock:", e.message || e);
+  }
+}
+
+function releaseWakeLock() {
+  wantWakeLock = false;
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") acquireWakeLock();
+});
+
 // ── GPS → Firebase (throttled) ────────────────────────────────────────────────
 function startGeo() {
+  wantWakeLock = true;
+  acquireWakeLock();
   watchId = navigator.geolocation.watchPosition(
     (pos) => {
       const c = pos.coords;
