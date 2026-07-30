@@ -323,7 +323,17 @@ static void convoy_wifi_end(void) {
     // Withdraw BEFORE the socket goes: leaving the Tracker should take the board
     // out of the public list immediately, not leave it there until it ages out.
     if (s_cvw_joined && WiFi.status() == WL_CONNECTED) convoy_wifi_unannounce();
+    // setReuse(true) is what makes polling cheap: end() deliberately KEEPS the
+    // socket and its mbedTLS context alive so the next request skips the ~47KB
+    // handshake. On teardown that is exactly wrong — it strands those 47KB of
+    // INTERNAL RAM, which is the memory the BT controller needs to come up. Left
+    // as-is, each cloud session walked the free-heap baseline down (174K -> 130K
+    // -> 127K) until switching to Meshtastic could no longer bring NimBLE up.
+    // Turning reuse off first makes end() actually close it, and stop() frees the
+    // TLS context even if the socket was already gone.
+    s_cvw_http.setReuse(false);
     if (s_cvw_begun) { s_cvw_http.end(); s_cvw_begun = false; }
+    s_cvw_client.stop();
     if (s_cvw_joined) {
         // Leave the radio powered: the OBD worker owns WiFi and re-inits it on
         // its own once convoy_radio_mode clears. Calling WIFI_OFF from here is

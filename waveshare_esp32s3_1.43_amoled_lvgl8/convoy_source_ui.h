@@ -21,12 +21,14 @@
 #include "convoy_ui.h"     // reuse cv_label + CV_ORANGE + the dark palette
 
 #define CVSRC_MAX_DEV 8
-#define CVSRC_CYAN lv_color_hex(0x00E5FF)
+#define CVSRC_CYAN  lv_color_hex(0x00E5FF)
+#define CVSRC_GREEN lv_color_hex(0x00E676)
 
 // ── Callbacks (assigned by firmware / sim) ───────────────────────────────────
 static void (*convoy_src_on_scan)(void)       = NULL;  // opened page 2 → start scan
 static void (*convoy_src_on_pick_device)(int) = NULL;  // tapped a scanned T-Beam
 static void (*convoy_src_on_use_phone)(void)  = NULL;  // tapped Use phone
+static void (*convoy_src_on_use_cloud)(void)  = NULL;  // tapped Convoy (WiFi)
 static void (*convoy_src_on_back)(void)       = NULL;  // X on page 1 → radar
 
 // Screen loader hook: the firmware installs a "clean" loader (deferred load +
@@ -73,6 +75,7 @@ static void cvsrc_mesh_evt(lv_event_t *e) {          // page 1: MESHTASTIC → p
     if (convoy_src_on_scan) convoy_src_on_scan();
 }
 static void cvsrc_phone_evt(lv_event_t *e) { (void)e; if (convoy_src_on_use_phone) convoy_src_on_use_phone(); }
+static void cvsrc_cloud_evt(lv_event_t *e) { (void)e; if (convoy_src_on_use_cloud) convoy_src_on_use_cloud(); }
 static void cvsrc_back_evt(lv_event_t *e)  { (void)e; if (convoy_src_on_back)  convoy_src_on_back();  }
 static void cvsrc_scan_back_evt(lv_event_t *e) { (void)e; convoy_src_show(convoy_src_screen); }  // page 2 X → page 1
 static void cvsrc_dev_evt(lv_event_t *e) {
@@ -143,10 +146,14 @@ static lv_obj_t *convoy_src_build_screen(void) {
 
     // Page 1 — source select
     convoy_src_screen = cvsrc_page("CONVOY SOURCE");
+    // Three sources now. 82px pitch keeps a 16px gap between the 66px cards and
+    // still clears the round screen's edges at the top and bottom rows.
     lv_obj_t *m = cvsrc_card(convoy_src_screen, "MESHTASTIC", "Scan for T-Beam", CVSRC_CYAN, cvsrc_mesh_evt);
-    lv_obj_align(m, LV_ALIGN_CENTER, 0, -40);
-    lv_obj_t *p = cvsrc_card(convoy_src_screen, "USE PHONE", "Relay from phone app", CV_ORANGE, cvsrc_phone_evt);
-    lv_obj_align(p, LV_ALIGN_CENTER, 0, 42);
+    lv_obj_align(m, LV_ALIGN_CENTER, 0, -82);
+    lv_obj_t *c = cvsrc_card(convoy_src_screen, "CONVOY", "Over phone hotspot", CVSRC_GREEN, cvsrc_cloud_evt);
+    lv_obj_align(c, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *p = cvsrc_card(convoy_src_screen, "USE PHONE", "Relay over Bluetooth", CV_ORANGE, cvsrc_phone_evt);
+    lv_obj_align(p, LV_ALIGN_CENTER, 0, 82);
     cvsrc_close_btn(convoy_src_screen, cvsrc_back_evt);
 
     // Page 2 — device scan
