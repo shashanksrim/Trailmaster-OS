@@ -41,14 +41,49 @@ a room (the room code is the shared secret):
           }
         }
       }
+    },
+    "devices": {
+      ".read": true,
+      "$id": {
+        ".write": true,
+        ".validate": "$id.length <= 24",
+        "name":     { ".validate": "newData.isString() && newData.val().length <= 24" },
+        "ts":       { ".validate": "newData.isNumber()" },
+        "room":     { ".validate": "newData.isString() && newData.val().length <= 15" },
+        "callsign": { ".validate": "newData.isString() && newData.val().length <= 11" },
+        "$other":   { ".validate": false }
+      }
     }
   }
 }
 ```
 
-> MVP-grade: anyone with a room code can read/write that room. To harden later,
-> add Firebase **Anonymous Auth** and gate `.write` on `auth != null` +
-> `$mid === auth.uid`, and rotate codes. Fine for a private convoy to start.
+**`devices` is not optional — omit it and board pairing breaks.** Realtime
+Database rules are deny-by-default, so a rule set that only mentions `convoys`
+denies everything else. An earlier version of this file did exactly that, which
+would have silently killed the Connect button.
+
+Note that `.write` is granted at `$code`/`$id`, never at the `convoys` or
+`devices` root, so no one can wipe a whole collection in a single write. The
+`$other` rule rejects unknown fields, so the database cannot be used as free
+storage.
+
+> **MVP-grade, and worth being honest about the limits.** There is no auth, so
+> these rules constrain the *shape* of writes, not *who* makes them: anyone with
+> a room code can read and write that room, and anyone can list `devices` and
+> assign a room to a board that is currently listed.
+>
+> The board bounds that exposure itself rather than relying on these rules — it
+> only publishes `devices/<id>` for a few minutes after you open the Tracker,
+> and deletes the node when the window closes or you leave (see
+> `CONVOY_WIFI_PAIR_WINDOW_MS` in `convoy_wifi.h`). So an idle board is not
+> listed and cannot be re-pointed; an attacker has to be writing during the same
+> window you are pairing in.
+>
+> The real fix is Firebase **Anonymous Auth**, gating `.write` on `auth != null`,
+> scoping `$mid === auth.uid`, and recording an owner uid on each device so only
+> that uid can assign it a room. Worth doing before this is used by anyone
+> outside a private group.
 
 ---
 
