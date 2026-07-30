@@ -168,7 +168,39 @@ fails or sees none of them (a hidden SSID never appears in a scan). This removed
 the 15s dead wait on out-of-range home WiFi — which was costing OTA too, not just
 convoy.
 
-### Phase 2 — `CVS_CLOUD` in the source picker and role switch
+### Phase 2 — ✅ PROVEN ON HARDWARE 2026-07-30
+Three sources in the picker (MESHTASTIC / CONVOY / USE PHONE), replacing the
+`CONVOY_WIFI_SPIKE` compile flag that had left both BLE sources unreachable.
+
+Three **role classes** now, not three sources: NimBLE central (scan/mesh), NimBLE
+peripheral (phone), WiFi STA (cloud). `convoy_radio_renegotiate()` re-runs the
+OBD handover when a class change also changes which radio we hold, since the ack
+means "WiFi is off" for BLE but "STA left up" for WiFi. Order is strict — old
+stack down, radio changes hands, new stack up — because the BT controller cannot
+get its buffers while the WiFi stack is up.
+
+Both directions verified over repeated cycles:
+
+```
+[CVY] radio now WiFi (STA); internal=174868    → role -> 4, roster streaming
+[CVY] radio now BLE (WiFi off); internal=172696
+[CVY] BLE up (internal RAM 172696 -> 109732)   → my_node_num=0FD8C818
+```
+
+**A real leak fell out of this, and it corrects the Phase 3 claim below.**
+`setReuse(true)` is what makes polling cheap — `end()` keeps the socket and its
+mbedTLS context so the next request skips the ~47KB handshake — but on teardown
+it stranded those 47KB of *internal* RAM, exactly what NimBLE needs. Each cloud
+session walked the baseline down (174K → 130K → 127K) until switching back to
+Meshtastic could no longer bring BLE up and the link stalled mid-connect.
+`convoy_wifi_end()` now clears reuse and calls `stop()` explicitly; the baseline
+then holds flat at ~172K across three cycles.
+
+Measurement lesson worth keeping: the earlier "no leak" reading was taken
+join-to-join *within one source*, which never ran the leaking teardown. Only
+cycling two sources exposed it.
+
+### Phase 2 (original plan) — `CVS_CLOUD` in the source picker and role switch
 Add to `cvs_source_t` and `convoy_source_ui.h`. In `convoyLinkTask`
 (`.ino:2114-2151`) the role-class test grows a third class: WiFi. Class change
 BLE↔WiFi requires full teardown of whichever stack is up.
@@ -223,10 +255,11 @@ speak, so pairing rides on that.
 
 The `/convoy` portal tab was still built and remains as a manual override.
 
-**Memory across cycles is fine.** Like-for-like at the join line over two full
-Tracker enter/exit cycles: 175112 → 174400, ~700 bytes. The "22KB not returned"
-noted in Phase 0 was a measurement artefact (before-WiFi-init vs
-after-disconnect-with-stack-resident), not a leak.
+**Memory across cycles — THIS CLAIM WAS WRONG; see Phase 2.** Measured
+like-for-like at the join line over two Tracker cycles (175112 → 174400) it
+looked clean, but both cycles used the same source, so the teardown that actually
+leaked never ran. Cycling cloud ⇄ mesh exposed ~47KB of TLS session stranded per
+cloud session. Fixed in Phase 2.
 
 **Not yet deployed.** The Connect button, board list and link write are built and
 render correctly, but the phone loads the app from GitHub Pages on `main`, so the
