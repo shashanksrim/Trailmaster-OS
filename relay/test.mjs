@@ -18,8 +18,47 @@ console.log("=== relay worker ===");
 // --- auth ---
 let r = await call("/AENP/WRONG?id=TM1&lat=1&lon=2");
 check(r.status === 403, "bad token rejected");
-r = await call("/AENP?id=TM1&lat=1&lon=2");
+r = await call("/?id=TM1&lat=1&lon=2");
 check(r.status === 400, "missing token rejected");
+
+// --- permanent URL: room comes from assign/<callsign>, not the path ---
+// This is what lets a driver paste the URL once and never touch it again; the
+// room changes every convoy, so pinning it in the URL is the friction to kill.
+let assignLookups = [];
+globalThis.fetch = async (url, init) => {
+  if (String(url).includes("/assign/")) {
+    assignLookups.push(String(url));
+    const cs = String(url).split("/assign/")[1].replace(".json", "");
+    return new Response(JSON.stringify(cs === "TM1" ? { room: "aenp", ts: 1 } : null), { status: 200 });
+  }
+  sent = { url, body: JSON.parse(init.body), method: init.method };
+  return new Response("{}", { status: 200 });
+};
+
+sent = null;
+r = await call("/SEKRIT?id=TM1&lat=12.9&lon=77.6&timestamp=1785400000");
+check(r.status === 200, "token-only URL accepted");
+check(assignLookups.length === 1, "looked up the assignment");
+check(sent.url.includes("/convoys/AENP/members/TM1.json"),
+      `room from assignment, uppercased (${sent.url})`);
+
+// A phone that is configured but not in any convoy must not error — that is a
+// normal state between drives, and an error would surface in the app as a
+// permanent upload failure.
+sent = null;
+r = await call("/SEKRIT?id=NOONE&lat=1&lon=2");
+check(r.status === 200, "unassigned callsign is not an error");
+check(sent === null, "unassigned callsign writes nothing");
+
+// The old pinned-room URL must keep working so existing phones do not break.
+sent = null;
+r = await call("/AENP/SEKRIT?id=TM1&lat=1&lon=2");
+check(sent.url.includes("/convoys/AENP/members/TM1.json"), "pinned-room URL still works");
+
+globalThis.fetch = async (url, init) => {
+  sent = { url, body: JSON.parse(init.body), method: init.method };
+  return new Response("{}", { status: 200 });
+};
 
 // --- OsmAnd query protocol (what Traccar Client sends by default) ---
 sent = null;

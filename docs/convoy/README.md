@@ -53,15 +53,27 @@ a room (the room code is the shared secret):
         "callsign": { ".validate": "newData.isString() && newData.val().length <= 11" },
         "$other":   { ".validate": false }
       }
+    },
+    "assign": {
+      "$callsign": {
+        ".read": true,
+        ".write": true,
+        ".validate": "$callsign.length <= 5",
+        "room": { ".validate": "newData.isString() && newData.val().length <= 15" },
+        "ts":   { ".validate": "newData.isNumber()" },
+        "$other": { ".validate": false }
+      }
     }
   }
 }
 ```
 
-**`devices` is not optional — omit it and board pairing breaks.** Realtime
-Database rules are deny-by-default, so a rule set that only mentions `convoys`
-denies everything else. An earlier version of this file did exactly that, which
-would have silently killed the Connect button.
+**`devices` and `assign` are not optional.** Realtime Database rules are
+deny-by-default, so a rule set that only mentions `convoys` denies everything
+else. An earlier version of this file did exactly that, which would have silently
+killed the Connect button. `devices` carries board pairing; `assign` maps a
+driver's callsign to the convoy they are currently in, which is what lets the
+phone's tracking URL stay the same forever (see `relay/`).
 
 Note that `.write` is granted at `$code`/`$id`, never at the `convoys` or
 `devices` root, so no one can wipe a whole collection in a single write. The

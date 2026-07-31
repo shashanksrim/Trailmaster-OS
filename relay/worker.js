@@ -203,14 +203,23 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Path carries the room and a shared secret: /<ROOM>/<TOKEN>. Traccar
-    // appends its own query string, and some versions add a trailing slash.
+    // Two URL forms, and the shorter one is the point:
+    //
+    //   /<TOKEN>            room resolved from assign/<callsign>   ← permanent
+    //   /<ROOM>/<TOKEN>     room pinned in the URL                 ← legacy
+    //
+    // Room codes change with every convoy. With the room in the URL, every
+    // driver has to re-paste a long URL each time — which is precisely the
+    // friction worth removing. Looking the room up per callsign instead means
+    // the phone is configured once, ever, and changing convoys happens in the
+    // web app, which people open anyway.
     const parts = url.pathname.split("/").filter(Boolean);
-    const room = (parts[0] || "").toUpperCase();
-    const token = parts[1] || "";
+    let pinnedRoom = "", token = "";
+    if (parts.length >= 2)      { pinnedRoom = parts[0].toUpperCase(); token = parts[1]; }
+    else if (parts.length === 1) { token = parts[0]; }
 
-    if (!room || !token) {
-      return new Response("usage: /<ROOM>/<TOKEN>?id=CALLSIGN&lat=..&lon=..\n", { status: 400 });
+    if (!token) {
+      return new Response("usage: /<TOKEN>?id=CALLSIGN&lat=..&lon=..\n", { status: 400 });
     }
     // Without this the URL would be a world-writable endpoint into the convoy.
     // Set RELAY_TOKEN with:  wrangler secret put RELAY_TOKEN
@@ -257,6 +266,30 @@ export default {
     // The published RTDB rules require callsign + ts and cap callsign at 5.
     const callsign = String(f.id).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
     if (!callsign) return new Response("bad device id\n", { status: 400 });
+
+    // Resolve the room: pinned in the URL, else whatever the web app last
+    // assigned this callsign when it joined a convoy.
+    let room = pinnedRoom;
+    if (!room) {
+      try {
+        const a = await fetch(`${DB}/assign/${encodeURIComponent(callsign)}.json`);
+        if (a.ok) {
+          const v = await a.json();
+          room = (typeof v === "string" ? v : v && v.room) || "";
+          room = String(room).toUpperCase();
+        }
+      } catch (e) { console.log("assign lookup failed:", e.message); }
+    }
+    if (!room) {
+      // Configured phone, but not currently in a convoy. Not an error — the app
+      // should keep reporting quietly, and will land somewhere the moment the
+      // user joins a room. Failing here would make the app show upload errors
+      // for a state that is entirely normal between drives.
+      console.log("no room assigned for", callsign);
+      return isOwnTracks(body)
+        ? new Response("[]", { status: 200, headers: { "content-type": "application/json" } })
+        : new Response("ok (no convoy assigned)\n", { status: 200 });
+    }
 
     const member = {
       name: callsign,
