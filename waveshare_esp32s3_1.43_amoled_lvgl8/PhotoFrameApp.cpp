@@ -67,8 +67,8 @@ const char index_html[] = R"rawliteral(
     <div class="container">
         <div class="tabs">
             <a href="/wifi" class="tab">Wi-Fi</a>
-            <a href="/photos" class="tab active">Photos</a>
             <a href="/convoy" class="tab">Convoy</a>
+            <a href="/photos" class="tab active">Photos</a>
         </div>
         <div class="card">
             <div class="warning-banner" id="macWarning">
@@ -1049,8 +1049,8 @@ void photoframe_setup() {
   <div class="container">
       <div class="tabs">
           <a href="/wifi" class="tab active">Wi-Fi</a>
-          <a href="/photos" class="tab">Photos</a>
           <a href="/convoy" class="tab">Convoy</a>
+          <a href="/photos" class="tab">Photos</a>
       </div>
       <p>Add your home WiFi or phone hotspot. The device will connect automatically when you check for updates.</p>
       <div class='card'>
@@ -1113,8 +1113,8 @@ void photoframe_setup() {
   <div class="container">
       <div class="tabs">
           <a href="/wifi" class="tab">Wi-Fi</a>
-          <a href="/photos" class="tab">Photos</a>
           <a href="/convoy" class="tab active">Convoy</a>
+          <a href="/photos" class="tab">Photos</a>
       </div>
       <p>Join the same convoy your phone is in, so the Tracker can show the other cars.</p>
       <div class='card'>
