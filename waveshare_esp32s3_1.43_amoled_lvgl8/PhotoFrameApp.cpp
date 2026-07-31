@@ -1116,9 +1116,26 @@ void photoframe_setup() {
           <a href="/convoy" class="tab active">Convoy</a>
           <a href="/photos" class="tab">Photos</a>
       </div>
-      <p>Join the same convoy your phone is in, so the Tracker can show the other cars.</p>
+      <p>Convoy is set up from the app, not from here.</p>
       <div class='card'>
-        <h2>Convoy Room</h2>
+        <h2>Set up convoy</h2>
+        <p style='text-align:left;margin:0 0 12px'>Everything convoy &mdash; joining a
+        convoy, linking this board, background tracking &mdash; happens at:</p>
+        <div style='background:#000;padding:14px;border-radius:8px;text-align:center;
+                    font-size:18px;letter-spacing:1px;color:#9cf;margin-bottom:12px'>
+          tinyurl.com/trailmstr
+        </div>
+        <p style='text-align:left;color:#888;font-size:13px;margin:0'>
+        <b>Disconnect from Jimny_Dash_Sync first</b> &mdash; while you are on the
+        board's Wi-Fi your phone has no internet, so that link will not load.
+        Rejoin your normal network, open it, and tap <b>Connect</b> to link this
+        board. No codes to type.</p>
+      </div>
+      <div class='card'>
+        <h2>Manual override</h2>
+        <p style='text-align:left;color:#888;font-size:13px;margin:0 0 12px'>Only
+        needed if you cannot reach the app. Linking from the app sets both of
+        these for you, and keeps them up to date when the convoy changes.</p>
         <form method='POST' action='/convoy/save'>
           <label>Room code</label>
           <input type='text' name='room' maxlength='15' placeholder='e.g. AENP' value=')rawliteral";
@@ -1131,6 +1148,8 @@ void photoframe_setup() {
         page += R"rawliteral('>
           <div class='hint'>Must match your own callsign in the app &mdash; that entry is what puts this car on the radar. Everyone else shows as another car.</div>
           <button class='primary' type='submit'>Save to Device</button>
+          <div class='hint' style='margin-top:10px'>Note: the app overwrites these
+          when you link the board, which is usually what you want.</div>
         </form>
       </div>
   </div>

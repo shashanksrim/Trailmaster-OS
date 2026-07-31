@@ -14,6 +14,12 @@
 // This URL points to docs/version.json on your GitHub Pages site.
 // Update this to match your actual GitHub username / repo name.
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/version.json"
+
+// Photo-frame manifest, written by the convoy web app. Same shape as the
+// version.json sd_files array: {"files":[{"path":"/photos/x.jpg","url":"..."}]}.
+// Kept in the Realtime Database rather than the repo so uploading photos does
+// not mean making a commit.
+#define OTA_PHOTO_MANIFEST_URL "https://trailmaster-e43b1-default-rtdb.asia-southeast1.firebasedatabase.app/photos.json"
 #define OTA_NVS_NS       "ota_wifi"
 #define OTA_MAX_NETWORKS 8
 #define OTA_WIFI_TIMEOUT_MS 15000
@@ -429,23 +435,21 @@ static bool download_and_flash_firmware(const char* url) {
 }
 
 // ── SD Card File Updates ──────────────────────────────────────────────────────
-static void download_sd_files() {
-    // Re-fetch version.json to get the sd_files list
-    HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
-    http.begin(client, OTA_VERSION_URL);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    int code = http.GET();
-    if (code != 200) { http.end(); return; }
-
-    String payload = http.getString();
-    http.end();
-
-    // Simple manual parser for sd_files array:
-    // Looks for repeated {"path":"...","url":"..."} blocks
+// Download every {"path":..,"url":..} pair found under `key` onto the SD card,
+// skipping anything already present.
+//
+// Shared by two callers with the same shape and the same skip-if-present
+// behaviour: the OTA asset sync (`sd_files` in version.json) and photo sync
+// (`files` in the photo manifest). Photos used to require the phone to join the
+// board's access point and push them over the local network; pulling them from a
+// URL instead means photo setup can live at the same public URL as everything
+// else, and the captive portal is left doing only the Wi-Fi bootstrap that
+// genuinely cannot happen anywhere else.
+static void download_file_list(const String& payload, const char* key, const char* label) {
     const char* p = payload.c_str();
-    const char* sd_files_start = strstr(p, "\"sd_files\"");
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* sd_files_start = strstr(p, pat);
     if (!sd_files_start) return;
 
     int total_files = 0;
@@ -495,7 +499,7 @@ static void download_sd_files() {
         }
 
         char status_buf[96];
-        snprintf(status_buf, sizeof(status_buf), "Updating SD files %d/%d", done + 1, total_files);
+        snprintf(status_buf, sizeof(status_buf), "%s %d/%d", label, done + 1, total_files);
         set_status(OTA_DOWNLOADING_SD, (done * 100) / total_files, status_buf);
 
         HTTPClient fhttp;
@@ -531,12 +535,54 @@ static void download_sd_files() {
                     delay(1);
                 }
                 fclose(fp);
-                Serial.printf("[OTA] SD file updated: %s\n", sd_path);
+                Serial.printf("[OTA] %s: wrote %s\n", label, sd_path);
             }
         }
         fhttp.end();
         done++;
     }
+}
+
+static void download_sd_files() {
+    // Re-fetch version.json to get the sd_files list
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    http.begin(client, OTA_VERSION_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = http.GET();
+    if (code != 200) { http.end(); return; }
+    String payload = http.getString();
+    http.end();
+    download_file_list(payload, "sd_files", "Updating SD files");
+}
+
+// Pull photo-frame images from the manifest the web app publishes.
+//
+// Deliberately runs on the OTA connection path rather than acquiring the radio
+// itself: that path already picks the strongest saved network, which at home is
+// home Wi-Fi. Syncing over the phone's hotspot would push every photo up to the
+// cloud and straight back down through the same cellular link — paying for the
+// bytes twice — so preferring the network the board is already best connected to
+// is the whole point.
+void ota_sync_photos() {
+    if (WiFi.status() != WL_CONNECTED && !ota_wifi_connect_saved()) {
+        Serial.println("[OTA] photo sync: no network");
+        return;
+    }
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    http.begin(client, OTA_PHOTO_MANIFEST_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = http.GET();
+    if (code != 200) { Serial.printf("[OTA] photo manifest -> %d\n", code); http.end(); return; }
+    String payload = http.getString();
+    http.end();
+    // An empty manifest reads as the literal "null" from the Realtime Database.
+    if (payload.length() < 4) { Serial.println("[OTA] photo manifest empty"); return; }
+    download_file_list(payload, "files", "Syncing photos");
+    set_status(OTA_IDLE, 0, "Photos up to date");
 }
 
 // ── Background Task ───────────────────────────────────────────────────────────

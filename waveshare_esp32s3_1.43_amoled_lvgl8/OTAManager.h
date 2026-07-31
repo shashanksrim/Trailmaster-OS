@@ -40,6 +40,12 @@ int  ota_list_networks(char ssids[][33], int max_count); // returns count
 // The caller must already own the radio (see convoy_radio_mode in the .ino).
 bool ota_wifi_connect_saved();
 
+// Pull photo-frame images listed in the manifest the web app publishes, onto the
+// SD card. Reuses the updater's network path, which prefers the strongest saved
+// network — normally home Wi-Fi, so photos are not round-tripped through the
+// phone's cellular twice. Files already on the card are skipped.
+void ota_sync_photos();
+
 // Starts check+install flow on a background FreeRTOS task.
 // If an update is found, state becomes OTA_UPDATE_AVAILABLE.
 // Call ota_install() from the UI to proceed with download.
