@@ -363,17 +363,30 @@ void pf_show_upload_overlay(void) {
 
     // Logo removed as requested
 
+    // Drawn at NATIVE SIZE. The asset is 222x222 with a 4-module white quiet
+    // zone baked in, which is what makes it scannable — the previous 200x200
+    // asset had the finder pattern starting at pixel 0 (no quiet zone at all)
+    // and was drawn at zoom 215, i.e. a 0.84x downscale. QR needs that border,
+    // and resampling a bitmap QR by a non-integer factor smears module edges
+    // until a camera cannot resolve them. Never scale this by a non-integer
+    // factor; if it ever needs to be bigger, regenerate it or use 512 (2x).
     extern const lv_img_dsc_t wifi_qrcode;
     lv_obj_t * qr_img = lv_img_create(pf_upload_overlay);
     lv_img_set_src(qr_img, &wifi_qrcode);
-    lv_img_set_zoom(qr_img, 215);
-    lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, -10);   // 222px: clears the close button and the toggle row
 
     // Wi-Fi Toggle Switch — wrapped in a flex row so the label+switch pair is
     // centered as a unit (previously the switch was hardcoded at center+50,
     // with the label hung off its left edge, so the whole row sat off-center
     // by however wide the label happened to render). Switch size matches the
     // Settings screen's toggles (60x30) for consistency.
+    //
+    // DO NOT remove this to reclaim space for the QR. It looks redundant — the
+    // overlay is the Wi-Fi screen, so why ask again — and the deferred-start
+    // timer below looks like it would make auto-starting safe. It was tried:
+    // launching the AP automatically from the photo or settings screens garbles
+    // the display after the overlay closes. The extra tap is a deliberate trade
+    // against a bug that is not worth re-opening for thirty pixels.
     lv_obj_t * wifi_row = lv_obj_create(pf_upload_overlay);
     lv_obj_set_size(wifi_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(wifi_row, 0, 0);
@@ -383,7 +396,7 @@ void pf_show_upload_overlay(void) {
     lv_obj_set_flex_flow(wifi_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(wifi_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(wifi_row, 10, 0);
-    lv_obj_align(wifi_row, LV_ALIGN_CENTER, 0, 120);
+    lv_obj_align(wifi_row, LV_ALIGN_CENTER, 0, 130);
 
     lv_obj_t * wifi_lbl = lv_label_create(wifi_row);
     lv_label_set_text(wifi_lbl, "Enable Wi-Fi:");
@@ -419,7 +432,7 @@ void pf_show_upload_overlay(void) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(hint, LV_ALIGN_CENTER, 0, 160);
+    lv_obj_align(hint, LV_ALIGN_CENTER, 0, 168);
 
     lv_obj_t * cred_lbl = lv_label_create(pf_upload_overlay);
     lv_label_set_text(cred_lbl, "Visit 192.168.4.1");
