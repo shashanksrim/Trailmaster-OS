@@ -83,9 +83,34 @@ function parseTs(v) {
 //   id=TM1&lat=12.93&lon=77.69&timestamp=1785430293&accuracy=68.5&batt=47
 // Same field names and same units as the query protocol, so they are handled as
 // one path rather than duplicated.
-function extract(url, body, form) {
+// OwnTracks posts {_type:"location", lat, lon, tst, tid, vel, cog} and names the
+// user in the X-Limit-U / X-Limit-D headers. It is the app worth pointing people
+// at because — unlike Traccar Client — it can be configured from a single link
+// (owntracks:///config?inline=...), and because its HTTP mode lets the RESPONSE
+// carry the rest of the convoy back as "friends".
+function isOwnTracks(b) { return !!b && b._type === "location"; }
+
+function extract(url, body, form, headers) {
   const q = url.searchParams;
   const get = (k) => q.get(k) ?? (form ? form.get(k) : null);
+
+  if (isOwnTracks(body)) {
+    const b = body;
+    // Identity, best first: the configured username, then the topic's device
+    // segment, then the 2-char tracker id. tid alone collides easily in a
+    // convoy (TM1/TM4 both start "TM"), so it is the last resort.
+    const topicTail = typeof b.topic === "string" ? b.topic.split("/").filter(Boolean).pop() : null;
+    const id = (headers && (headers.get("x-limit-u") || headers.get("X-Limit-U"))) ||
+               topicTail || b.tid || null;
+    return {
+      id,
+      lat: num(b.lat), lon: num(b.lon),
+      // OwnTracks reports vel in KM/H; the board's threshold is m/s.
+      speed: num(b.vel) === null ? null : num(b.vel) / 3.6,
+      heading: num(b.cog),
+      ts: parseTs(b.tst) ?? Date.now(),
+    };
+  }
   // "OsmAnd style" means these flat field names, whether they arrived in the
   // query string or the body — as opposed to the nested JSON payload.
   const osmand = get("lat") !== null || get("latitude") !== null;
@@ -131,6 +156,49 @@ function extract(url, body, form) {
   return { id, lat, lon, speed, heading, ts };
 }
 
+// Build the OwnTracks "friends" reply: the rest of the convoy, as the app
+// expects to receive it.
+//
+// In HTTP mode the app never polls — the only chance to hand it anything is the
+// response to its own position POST. An array of _type location + card objects
+// is rendered as friends on its map, which means OwnTracks can show the convoy
+// without our web app being open at all.
+//
+// Documented as supported on both iOS and Android; iOS is worth verifying on a
+// real device before relying on it.
+// Anything older than this is a ghost, not a convoy member. The room accumulates
+// records from earlier sessions — and entries predating the database rules have
+// no callsign at all, so they can never update themselves and would otherwise
+// haunt the friends list forever at a three-day-old position.
+const FRIEND_STALE_MS = 30 * 60 * 1000;
+
+function buildFriends(members, selfCallsign, now = Date.now()) {
+  const out = [];
+  for (const [, m] of Object.entries(members || {})) {
+    if (!m || m.lat == null || m.lon == null) continue;             // no fix, nothing to place
+    const cs = m.callsign;
+    if (!cs) continue;                        // pre-rules ghost; the key is not a name
+    if (m.ts && now - m.ts > FRIEND_STALE_MS) continue;
+    if (cs.toUpperCase() === String(selfCallsign).toUpperCase()) continue;   // not ourselves
+
+    const topic = `owntracks/convoy/${cs}`;
+    out.push({
+      _type: "location",
+      tid: cs,
+      topic,
+      lat: m.lat,
+      lon: m.lon,
+      tst: Math.round((m.ts || Date.now()) / 1000),                 // OwnTracks wants seconds
+      vel: m.speed == null ? undefined : Math.round(m.speed * 3.6), // back to km/h
+      cog: m.heading == null ? undefined : Math.round(m.heading),
+    });
+    // The card carries the human-readable name; without it the app shows only
+    // the tracker id.
+    out.push({ _type: "card", tid: cs, topic, name: m.name || cs });
+  }
+  return out;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -164,7 +232,7 @@ export default {
       }
     }
 
-    const f = extract(url, body, form);
+    const f = extract(url, body, form, request.headers);
 
     // Traccar's client reports only "upload failed" with no detail, so a payload
     // we cannot read is invisible from both ends. Log the raw body whenever
@@ -214,6 +282,25 @@ export default {
       // Most likely cause is the rules rejecting the shape — surface it rather
       // than returning a bare 500, because Traccar shows nothing useful.
       return new Response(`firebase ${res.status}: ${detail}\n`, { status: 502 });
+    }
+
+    // OwnTracks: reply with the rest of the convoy so the app can draw it on its
+    // own map. It never polls in HTTP mode, so this response is the only chance
+    // to hand it anything. Traccar ignores the body, so this costs it nothing —
+    // but skip the extra Firebase read for clients that cannot use it.
+    if (isOwnTracks(body)) {
+      let friends = [];
+      try {
+        const r = await fetch(`${DB}/convoys/${encodeURIComponent(room)}/members.json`);
+        if (r.ok) friends = buildFriends(await r.json(), callsign);
+      } catch (e) {
+        // A failed roster read must not fail the position report — the write
+        // already succeeded, and the app will ask again in a few seconds.
+        console.log("friends read failed:", e.message);
+      }
+      return new Response(JSON.stringify(friends), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
     }
 
     return new Response(url.searchParams.has("debug")

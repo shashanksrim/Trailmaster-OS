@@ -147,6 +147,70 @@ await call("/AENP/SEKRIT", {
 near(sent.body.lat, 12.5, "location string lat");
 near(sent.body.lon, 77.5, "location string lon");
 
+// --- OwnTracks: inbound mapping + friends reply ---
+// OwnTracks is the app worth pointing people at: it is the only one of the two
+// that can be configured from a link, and its HTTP response can carry the rest
+// of the convoy back as "friends" for its own map.
+globalThis.fetch = async (url, init) => {
+  if (init && init.method === "PATCH") { sent = { url, body: JSON.parse(init.body) }; return new Response("{}", { status: 200 }); }
+  // the roster read for the friends reply
+  const fresh = Date.now();
+  return new Response(JSON.stringify({
+    TM1: { callsign: "TM1", name: "Shashank", lat: 12.9, lon: 77.6, speed: 10, heading: 90, ts: fresh },
+    TM5: { callsign: "TM5", name: "Ravi", lat: 12.8, lon: 77.5, ts: fresh },
+    GHOST: { callsign: "GHOST", ts: fresh },                  // joined, no fix yet
+    // Pre-rules record: no callsign, so it can never update itself again.
+    m_lwynmlxp: { lat: 12.99, lon: 77.71, ts: fresh },
+    // Real callsign but three days old — a leftover from an earlier drive.
+    OLD: { callsign: "OLD", name: "Stale", lat: 1, lon: 2, ts: fresh - 3 * 86400 * 1000 },
+  }), { status: 200 });
+};
+
+sent = null;
+r = await call("/AENP/SEKRIT", {
+  method: "POST",
+  headers: { "content-type": "application/json", "X-Limit-U": "TM1" },
+  body: JSON.stringify({ _type: "location", lat: 12.95, lon: 77.65, tst: 1785400000,
+                         vel: 36, cog: 180, tid: "TM", batt: 80 }),
+});
+check(r.status === 200, "owntracks location accepted");
+check(sent.body.callsign === "TM1", "identity from X-Limit-U, not the 2-char tid");
+near(sent.body.speed, 10, "owntracks vel km/h -> m/s");
+near(sent.body.heading, 180, "owntracks cog -> heading");
+check(sent.body.ts === 1785400000000, `owntracks tst seconds->ms (got ${sent.body.ts})`);
+
+const friends = await r.json();
+check(Array.isArray(friends), "friends reply is an array");
+const locs = friends.filter((x) => x._type === "location");
+const cards = friends.filter((x) => x._type === "card");
+check(!locs.some((l) => l.tid === "TM1"), "self excluded from friends");
+check(locs.some((l) => l.tid === "TM5"), "other member present as friend");
+check(!locs.some((l) => l.tid === "GHOST"), "member with no fix omitted");
+check(!locs.some((l) => l.tid === "m_lwynmlxp"), "callsign-less ghost omitted (no raw keys as names)");
+check(!locs.some((l) => l.tid === "OLD"), "three-day-old member omitted");
+check(cards.some((c) => c.tid === "TM5" && c.name === "Ravi"), "card carries the display name");
+const tm5 = locs.find((l) => l.tid === "TM5");
+// Seconds, not milliseconds — the fixture is "now", so assert the unit rather
+// than a frozen value. A ms value here would put friends 55,000 years out.
+check(tm5.tst < 1e11 && Math.abs(tm5.tst - Date.now() / 1000) < 5,
+      `friend tst is seconds near now (got ${tm5.tst})`);
+check(typeof tm5.topic === "string" && tm5.topic.includes("TM5"), "friend has a topic");
+
+// Identity falls back to the topic's device segment when no header is present.
+sent = null;
+await call("/AENP/SEKRIT", {
+  method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ _type: "location", lat: 1, lon: 2, tst: 1785400000,
+                         topic: "owntracks/shashank/TM9", tid: "TM" }),
+});
+check(sent.body.callsign === "TM9", `identity from topic tail (got ${sent.body.callsign})`);
+
+// Restore the simple stub for the remaining cases.
+globalThis.fetch = async (url, init) => {
+  sent = { url, body: JSON.parse(init.body), method: init.method };
+  return new Response("{}", { status: 200 });
+};
+
 // --- ms timestamps must not be multiplied again ---
 sent = null;
 await call("/AENP/SEKRIT?id=TM1&lat=1&lon=2&timestamp=1785400000000");
