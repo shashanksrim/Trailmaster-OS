@@ -8,6 +8,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getDatabase, ref, set, remove, update, onValue, get,
+  onChildAdded, onChildChanged, onChildRemoved,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS,
          RELAY_URL, RELAY_TOKEN } from "./config.js";
@@ -291,12 +292,25 @@ function pushFix() {
 }
 
 // ── Subscribe to the room ─────────────────────────────────────────────────────
+// Per-CHILD listeners, not onValue on the whole members node.
+//
+// onValue re-sends the entire roster to every listener on every position update.
+// With N cars each pushing every PUSH_INTERVAL_MS that is O(N^3) egress: fine at
+// six cars (~117 MB per four-hour drive), but ~4.3 GB at twenty — which burns the
+// 10 GB/month free tier in two drives. Child listeners send only the member that
+// actually changed, making it O(N^2) and roughly twenty times cheaper at that
+// size. Same rendering, same behaviour; only the wire traffic differs.
 function subscribe() {
-  const cb = onValue(roomRef, (snap) => {
-    members = snap.val() || {};
-    render();
-  });
-  unsub = cb;   // onValue returns its own unsubscribe fn
+  // onValue replaced the roster wholesale on every fire; child listeners only
+  // ever add to it, so start clean or a previous room's cars could linger.
+  members = {};
+  const upsert = (s) => { members[s.key] = s.val(); render(); };
+  const offs = [
+    onChildAdded(roomRef, upsert),
+    onChildChanged(roomRef, upsert),
+    onChildRemoved(roomRef, (s) => { delete members[s.key]; render(); }),
+  ];
+  unsub = () => offs.forEach((off) => off());
 }
 
 // ── Map + roster render ───────────────────────────────────────────────────────
