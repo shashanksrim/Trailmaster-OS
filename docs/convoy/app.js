@@ -9,7 +9,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import {
   getDatabase, ref, set, remove, update, onValue, get,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS } from "./config.js";
+import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS,
+         RELAY_URL, RELAY_TOKEN } from "./config.js";
 
 // ── Colors: mirror convoy_ui.h so the phone map and the board radar agree ─────
 const HUES = ["#00E5FF", "#00E676", "#FFD54F", "#FF4081", "#B388FF", "#FF8A65"];
@@ -109,6 +110,11 @@ function boot() {
   // relay path.
   $("btn-link").addEventListener("click", openBoardPicker);
   $("boards-close").addEventListener("click", () => $("boards").classList.add("hidden"));
+  $("track-close").addEventListener("click", () => $("track").classList.add("hidden"));
+  $("tr-manual").addEventListener("click", (e) => {
+    e.preventDefault();
+    $("tr-manual-box").classList.toggle("hidden");
+  });
 
   if (new URLSearchParams(location.search).has("demo")) { startDemo(); return; }
 
@@ -147,6 +153,10 @@ function doJoin(rawCode) {
 
   roomRef = ref(db, `convoys/${code}/members`);
   myRef   = ref(db, `convoys/${code}/members/${me.id}`);
+
+  // Point any background tracker at this convoy. Doing it here — rather than
+  // baking the room into the phone's URL — is what keeps that URL permanent.
+  publishAssignment();
 
   // Write an initial record so we appear even before the first GPS fix.
   set(myRef, {
@@ -562,6 +572,63 @@ async function pushBoard() {
     else await boardChar.writeValue(data);
   } catch (e) { /* transient BLE error — next tick retries */ }
 }
+// ── Background tracking (OwnTracks) ─────────────────────────────────────────
+// This page cannot report position with the screen off — geolocation stops when
+// it backgrounds, service workers have no access to it, and iOS suspends the tab
+// outright. OwnTracks does it properly on both platforms, posting to the relay
+// Worker, which writes into the same room. So reporting stops depending on
+// anyone keeping a browser tab alive.
+//
+// The relay URL deliberately contains NO room code. The room is looked up from
+// assign/<callsign>, written below when you join — which is why the phone is
+// configured once and never again, even though room codes change every convoy.
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+function relayUrl() { return `${RELAY_URL}/${RELAY_TOKEN}`; }
+
+// Build the one-tap configuration link. OwnTracks accepts a base64-encoded
+// .otrc config inline in a URL, which is the whole reason to prefer it over
+// Traccar Client — nobody has to type a URL on a phone keyboard.
+function ownTracksConfigLink(callsign) {
+  const cfg = {
+    _type: "configuration",
+    mode: 3,                        // 3 = HTTP (0 would be MQTT)
+    url: relayUrl(),
+    username: callsign,             // arrives as X-Limit-U; becomes the callsign
+    deviceId: "convoy",
+    tid: callsign.slice(-2),        // 2-char label OwnTracks draws on the map
+    monitoring: 1,                  // significant-change reporting
+    locatorInterval: 30,
+    locatorDisplacement: 50,
+    pubExtendedData: true,
+  };
+  // btoa needs latin1; callsigns are alphanumeric so this is safe.
+  return "owntracks:///config?inline=" + encodeURIComponent(btoa(JSON.stringify(cfg)));
+}
+
+// Tell the relay which convoy this callsign is currently in. Called on join, so
+// switching convoys never requires touching the phone's tracking config.
+async function publishAssignment() {
+  if (!db || !me || !me.callsign || !me.code) return;
+  try {
+    await set(ref(db, `assign/${me.callsign}`), { room: me.code, ts: now() });
+  } catch (e) {
+    console.warn("assign:", e.message || e);
+  }
+}
+
+function openTracking() {
+  if (!me || !me.callsign) return;
+  $("track").classList.remove("hidden");
+  $("tr-store").href = isIOS()
+    ? "https://apps.apple.com/app/owntracks/id692424691"
+    : "https://play.google.com/store/apps/details?id=org.owntracks.android";
+  $("tr-config").href = ownTracksConfigLink(me.callsign);
+  $("tr-url").textContent = relayUrl();
+  $("tr-user").textContent = me.callsign;
+}
+
 // ── Board picker (Firebase-mediated pairing) ────────────────────────────────
 // A browser cannot discover or talk to the board over the LAN — the page is
 // HTTPS and the board is plain http on a private IP, which is hard-blocked as
@@ -587,8 +654,28 @@ async function openBoardPicker() {
     .filter(([, d]) => d && d.ts && (now() - d.ts) < BOARD_FRESH_MS);
 
   box.textContent = "";
+
+  // This phone first: keeping it reporting with the screen off matters to every
+  // driver, whereas the board list only matters to whoever owns the Trailmaster.
+  {
+    const row  = document.createElement("div"); row.className = "brow";
+    const info = document.createElement("div");
+    const nm   = document.createElement("b");     nm.textContent = "This phone";
+    const st   = document.createElement("small"); st.textContent = "keep reporting with the screen off";
+    info.append(nm, st);
+    const btn = document.createElement("button");
+    btn.className = "btn btn-orange";
+    btn.textContent = "Set up";
+    btn.addEventListener("click", () => { $("boards").classList.add("hidden"); openTracking(); });
+    row.append(info, btn);
+    box.appendChild(row);
+  }
+
   if (!fresh.length) {
-    box.textContent = "No boards online. Turn on your hotspot and open the Tracker on the board.";
+    const p = document.createElement("small");
+    p.style.color = "var(--muted)";
+    p.textContent = "No boards online. Turn on your hotspot and open the Tracker on the board.";
+    box.appendChild(p);
   }
   for (const [id, d] of fresh) {
     const linked = d.room && normalizeCode(d.room) === me.code;

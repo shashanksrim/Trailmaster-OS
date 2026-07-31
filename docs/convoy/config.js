@@ -33,3 +33,19 @@ export const ONLINE_WINDOW_MS = 120000;
 // Between ONLINE_WINDOW_MS and here they show greyed ("offline") — so a phone
 // that briefly locks or loses signal fades rather than vanishing instantly.
 export const STALE_DROP_MS = 600000;   // 10 min
+
+// ── Background tracking relay (see repo relay/) ──────────────────────────────
+// A phone that locks stops running this page, which stops watchPosition. The
+// OwnTracks app reports from the background instead, posting to this Worker,
+// which writes into the same convoy room. Reporting is then independent of this
+// page being open at all.
+//
+// The URL has NO room in it on purpose: the room is looked up per callsign from
+// assign/<callsign>, which this app writes when you join. That is what lets a
+// driver paste the URL once and never touch it again, even though the room code
+// changes every convoy.
+//
+// The token is a shared secret — without it the endpoint would be world-
+// writable into your convoys. Rotate with: wrangler secret put RELAY_TOKEN
+export const RELAY_URL   = "https://trailmaster-relay.shashank-srim.workers.dev";
+export const RELAY_TOKEN = "fed848d5c27743acc8a3";

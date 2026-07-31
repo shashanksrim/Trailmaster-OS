@@ -122,6 +122,43 @@
 </head>
 <body>
 
+  <!-- Background tracking setup. A locked phone stops running this page, so
+       position reporting is handed to the OwnTracks app, which works from the
+       background on both platforms. -->
+  <div id="track" class="overlay hidden">
+    <div class="brand"><h1>BACKGROUND <span>TRACKING</span></h1><p>Keep reporting with the screen off</p></div>
+    <div class="card">
+      <p style="text-align:left">This page stops sending your position when the phone
+      locks. OwnTracks keeps reporting from the background, so you can put the
+      phone in your pocket.</p>
+
+      <h2 style="font-size:14px;color:var(--orange);margin:18px 0 8px">1 &middot; Install OwnTracks</h2>
+      <a id="tr-store" class="btn btn-orange" style="display:block;text-align:center;text-decoration:none" href="#">Get the app</a>
+
+      <h2 style="font-size:14px;color:var(--orange);margin:18px 0 8px">2 &middot; Configure it</h2>
+      <a id="tr-config" class="btn btn-outline" style="display:block;text-align:center;text-decoration:none" href="#">Set up automatically</a>
+      <p style="color:var(--muted);font-size:12px;margin:8px 0 0;text-align:left">
+        Opens OwnTracks pre-filled. Tap the tick to accept.
+        <a href="#" id="tr-manual" style="color:var(--orange)">Enter it manually instead</a>
+      </p>
+      <div id="tr-manual-box" class="hidden" style="margin-top:10px">
+        <div style="color:var(--muted);font-size:12px;text-align:left">Mode <b>HTTP</b>, URL:</div>
+        <code id="tr-url" style="display:block;background:#000;padding:8px;border-radius:6px;color:#9cf;font-size:11px;word-break:break-all;margin:4px 0"></code>
+        <div style="color:var(--muted);font-size:12px;text-align:left">UserID: <b id="tr-user"></b></div>
+      </div>
+
+      <h2 style="font-size:14px;color:var(--orange);margin:18px 0 8px">3 &middot; Stop Android killing it</h2>
+      <p style="color:var(--muted);font-size:13px;text-align:left;margin:0">
+        Settings &rarr; Apps &rarr; OwnTracks &rarr; <b>Battery</b> &rarr; <b>Unrestricted</b>,
+        and <b>Location</b> &rarr; <b>Allow all the time</b>. On "Optimized" Android
+        suspends it the moment the screen goes off &mdash; this is the step that
+        silently breaks everything. iPhone needs <b>Always</b> location only.
+      </p>
+
+      <button id="track-close" class="btn btn-outline" style="margin-top:18px">Done</button>
+    </div>
+  </div>
+
   <!-- Board picker: lists Trailmaster boards that are online in Firebase, so the
        user taps their board instead of typing a room code into the device. -->
   <div id="boards" class="overlay hidden">
