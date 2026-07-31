@@ -69,6 +69,22 @@ Add `&debug=1` to any request to have the Worker echo what it parsed instead of
 guessing. For a POST it echoes the raw body — the cheapest way to learn a new
 Traccar version's payload shape if the format ever changes.
 
+## OwnTracks shows the convoy on its own map — including on iOS
+
+In HTTP mode the app never polls, so the response to its position POST is the
+only chance to hand it anything. This Worker replies with the rest of the convoy
+as `_type: location` + `_type: card` objects, which the app renders as **friends**
+on its own map. One app then both reports and displays the convoy.
+
+**Verified on a real iPhone 2026-07-31.** This is worth recording because
+[owntracks/ios#478](https://github.com/owntracks/ios/issues/478) reads as though
+friends-over-HTTP is an unimplemented request on iOS. It is not — the booklet is
+right and the issue is misleading. A friend published through this relay appeared
+in the iOS Friends tab.
+
+Friends only arrive in response to a publish, so nothing shows up until the app
+sends something. Force a publish if the list looks empty.
+
 ## Gotchas
 
 - **Don't join the same convoy in the web app while testing.** The app creates
