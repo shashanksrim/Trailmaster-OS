@@ -38,6 +38,7 @@
 #include "convoy_ui.h"       // convoy_set_self / _heading / _car, CONVOY_MAX_CARS
 #include "convoy_roster.h"   // pure JSON → convoy_member_t[]
 #include "convoy_cfg.h"      // room code + callsign, set from the captive portal
+#include "gps.h"             // gps_has_fix() — the local receiver outranks the roster
 
 // Firebase Realtime DB — keep in sync with docs/convoy/config.js (databaseURL).
 #define CONVOY_WIFI_DB_HOST "https://trailmaster-e43b1-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -50,6 +51,14 @@
 // CALLSIGN is which member in the room is THIS car: the board has no GPS, so its
 // own position comes from the owner phone's entry, found by callsign. Everyone
 // else in the room renders as another car.
+
+// How often the board pushes its OWN position into the room.
+//
+// Deliberately slower than the read poll. Reads are cheap and latency-sensitive
+// (you want other cars to move smoothly); writes cost RTDB quota and fan out to
+// every listening phone, so 3 s is a better trade — at road speed that is ~40 m
+// between updates, which the receiving apps interpolate over anyway.
+#define CONVOY_WIFI_PUB_MS    3000
 
 #define CONVOY_WIFI_POLL_MS   1500    // roster refresh cadence
 #define CONVOY_WIFI_RX_TTL_MS 10000   // "online" if a roster arrived within this
@@ -94,6 +103,9 @@ static uint32_t s_cvw_pair_until = 0;     // window closes at this millis()
 static bool     s_cvw_announced  = false; // devices/<id> currently published
 static char     s_cvw_url[224];
 static char     s_cvw_pair_url[224];
+static char     s_cvw_pub_url[248];       // our own members/<id> node
+static uint32_t s_cvw_next_pub  = 0;
+static uint32_t s_cvw_published = 0;      // successful writes, for the log
 // Stable per-board identity, derived from the eFuse MAC. The web app lists these
 // so the user can pick their own board instead of typing a room code.
 static char     s_cvw_dev_id[16];
@@ -117,21 +129,33 @@ static void convoy_wifi_apply(const char *json) {
     const double newest = convoy_roster_newest_ts(mem, n);
     const int self_idx = convoy_roster_find(mem, n, s_cvw_call);
 
-    if (self_idx >= 0) {
-        const convoy_member_t *s = &mem[self_idx];
-        convoy_set_self(s->lat, s->lon, s->has_fix);
-        if (s->has_fix) convoy_self_updates++;
-        if (s->has_fix && s->heading >= 0)
-            convoy_set_heading(s->heading, s->speed >= CONVOY_WIFI_MOVING_MIN);
-    } else {
-        // Nobody in the room is us. The radar still shows everyone else; we just
-        // have no ME position, same as an unfixed GPS.
-        convoy_set_self(0, 0, false);
+    // The board's own GPS outranks the roster: it is ~250 ms fresh rather than
+    // a 1.5 s poll behind, and it does not depend on the owner's phone being in
+    // the room at all. Skip our self-write entirely while it has a fix,
+    // otherwise this would overwrite the local position on every poll.
+    if (!gps_has_fix()) {
+        if (self_idx >= 0) {
+            const convoy_member_t *s = &mem[self_idx];
+            convoy_set_self(s->lat, s->lon, s->has_fix);
+            if (s->has_fix) convoy_self_updates++;
+            if (s->has_fix && s->heading >= 0)
+                convoy_set_heading(s->heading, s->speed >= CONVOY_WIFI_MOVING_MIN);
+        } else {
+            // Nobody in the room is us. The radar still shows everyone else; we
+            // just have no ME position, same as an unfixed GPS.
+            convoy_set_self(0, 0, false);
+        }
     }
 
     int car = 0;
     for (int i = 0; i < n && car < CONVOY_MAX_CARS; i++) {
+        // Skip EVERY entry bearing our callsign, not just the first match.
+        // Now that the board publishes its own position, the room can legitimately
+        // hold two entries for this car — the board's and the owner phone's, if
+        // the app is also running. Keying off self_idx alone would skip one and
+        // draw the other as a separate car sitting on top of us.
         if (i == self_idx) continue;
+        if (s_cvw_call[0] && strcasecmp(mem[i].callsign, s_cvw_call) == 0) continue;
         const convoy_member_t *m = &mem[i];
         const uint32_t hue = m->color ? m->color : CONVOY_WIFI_HUES[car % 6];
         convoy_set_car(car, m->callsign, m->lat, m->lon, lv_color_hex(hue),
@@ -179,6 +203,58 @@ static bool cvw_request(const char *url, const char *method, const char *body, S
     return true;
 }
 
+// Room-scoped URLs. Rebuilt whenever the room changes, which happens both at
+// begin() and when the app re-points us mid-session via convoy_wifi_pair_tick().
+static void cvw_build_room_urls(void) {
+    snprintf(s_cvw_url, sizeof(s_cvw_url), "%s/convoys/%s/members.json",
+             CONVOY_WIFI_DB_HOST, s_cvw_room);
+    // We publish under the stable device id rather than a random member id, so
+    // reconnecting updates our existing entry instead of littering the room
+    // with a fresh ghost car on every drive.
+    snprintf(s_cvw_pub_url, sizeof(s_cvw_pub_url), "%s/convoys/%s/members/%s.json",
+             CONVOY_WIFI_DB_HOST, s_cvw_room, s_cvw_dev_id);
+}
+
+// ── Publish our own position ─────────────────────────────────────────────────
+// The board is now a first-class convoy member, not just a display: other cars
+// see this Trailmaster whether or not the owner's phone app is running. That is
+// the whole point of putting a receiver on the board.
+//
+// Only ever called with a local fix. Publishing a stale or absent position
+// would be worse than publishing nothing — the receiving apps have no way to
+// tell a frozen car from a parked one, and would happily navigate toward it.
+// When the fix drops we simply stop writing, and our "ts" ages out so everyone
+// else's freshness filter marks us offline on its own.
+static void convoy_wifi_publish(void) {
+    if (!gps_has_fix()) return;
+
+    gps_fix_t f;
+    gps_get(&f);
+
+    // heading -1 means "unknown", matching the convention convoy_roster.h uses
+    // and what the web app already handles. A parked car has no course, and
+    // sending 0 would point every other driver's arrow due north.
+    const double hdg = f.course_valid ? f.course_deg : -1.0;
+
+    // "ts" uses RTDB's server-value sentinel rather than our GPS clock. We DO
+    // now have accurate UTC, but the phones all write server time, and mixing
+    // clock sources would make the freshness comparison meaningless.
+    char body[320];
+    snprintf(body, sizeof(body),
+             "{\"name\":\"%s\",\"callsign\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,"
+             "\"heading\":%.1f,\"speed\":%.2f,\"color\":\"#00E5FF\","
+             "\"ts\":{\".sv\":\"timestamp\"}}",
+             s_cvw_dev_name, s_cvw_call[0] ? s_cvw_call : "TM",
+             f.lat, f.lon, hdg, f.speed_mps);
+
+    if (cvw_request(s_cvw_pub_url, "PATCH", body, nullptr)) {
+        s_cvw_published++;
+        if (s_cvw_published == 1 || (s_cvw_published % 20) == 0)
+            Serial.printf("[CVW] published #%u: %.6f,%.6f hdg=%.0f sats=%d\n",
+                          (unsigned)s_cvw_published, f.lat, f.lon, hdg, f.sats_used);
+    }
+}
+
 // ── Pairing: announce this board, and pick up a room the app assigned ────────
 // The board publishes devices/<id> so the convoy web app can list it; the user
 // taps their board and the app writes room+callsign back into the same node.
@@ -188,33 +264,65 @@ static void convoy_wifi_pair_tick(void) {
     // Announce. "ts" uses RTDB's server-value sentinel because the board has no
     // synced clock and could not write a truthful timestamp itself; the server
     // stamps it, which is also what makes the app's freshness filter meaningful.
-    char body[160];
-    snprintf(body, sizeof(body),
-             "{\"name\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}", s_cvw_dev_name);
-    if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
-
-    // Read the node back: has the app assigned us a room?
+    // ORDER MATTERS: read, reconcile, then write.
+    //
+    // This used to announce first and read second, which made the two
+    // directions mutually exclusive. Writing our callsign before reading would
+    // destroy an app assignment we had not seen yet; not writing it at all (the
+    // old behaviour) meant an on-device callsign change never reached the app,
+    // so the board advertised a name nobody else ever saw. Reading first lets
+    // both work: the app's change is adopted below, and whatever survives
+    // reconciliation is what we publish back.
     String node;
     if (!cvw_request(s_cvw_pair_url, "GET", nullptr, &node)) return;
 
     char room[CONVOY_CFG_ROOM_MAX] = {}, call[CONVOY_CFG_CALL_MAX] = {};
     json_get_str(node.c_str(), "room",     room, sizeof(room));
     json_get_str(node.c_str(), "callsign", call, sizeof(call));
+    // Publish our identity back, including the callsign that survived the
+    // reconciliation below. Done unconditionally (even before a room exists) so
+    // the board still appears in the app's list for pairing.
+    {
+        char body[200];
+        snprintf(body, sizeof(body),
+                 "{\"name\":\"%s\",\"callsign\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
+                 s_cvw_dev_name, s_cvw_call[0] ? s_cvw_call : "TM");
+        if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
+    }
+
     if (!room[0]) return;                       // not linked yet
 
     char norm[CONVOY_CFG_ROOM_MAX];
     convoy_normalize_code(room, norm, sizeof(norm));
-    if (strcmp(norm, s_cvw_room) == 0 &&
-        (!call[0] || strcasecmp(call, s_cvw_call) == 0)) return;   // no change
+
+    // Only adopt a callsign the APP ACTIVELY CHANGED, not merely one that
+    // differs from ours.
+    //
+    // This node is the app's inbox, and it keeps returning whatever was written
+    // last — so a callsign the user just set on the device portal loses to the
+    // stale cloud value on the very next poll. Observed 2026-08-12: the portal
+    // set "Try1", this tick read back "TM1" from a node written nine days
+    // earlier, and every position published thereafter carried the wrong
+    // callsign with no indication why.
+    //
+    // Remembering the last value we took FROM the cloud disambiguates the two
+    // cases: unchanged means stale (keep the local edit), changed means the app
+    // genuinely reassigned us (adopt it).
+    static char s_cvw_cloud_call[CONVOY_CFG_CALL_MAX] = {0};
+    const bool app_changed_call = call[0] && strcasecmp(call, s_cvw_cloud_call) != 0;
+    if (call[0]) { strncpy(s_cvw_cloud_call, call, sizeof(s_cvw_cloud_call) - 1);
+                   s_cvw_cloud_call[sizeof(s_cvw_cloud_call) - 1] = '\0'; }
+
+    if (strcmp(norm, s_cvw_room) == 0 && !app_changed_call) return;   // nothing new
 
     // Adopt it, and remember it so the next drive needs no linking at all.
     strncpy(s_cvw_room, norm, sizeof(s_cvw_room) - 1); s_cvw_room[sizeof(s_cvw_room) - 1] = '\0';
-    if (call[0]) { strncpy(s_cvw_call, call, sizeof(s_cvw_call) - 1); s_cvw_call[sizeof(s_cvw_call) - 1] = '\0'; }
+    if (app_changed_call) { strncpy(s_cvw_call, call, sizeof(s_cvw_call) - 1); s_cvw_call[sizeof(s_cvw_call) - 1] = '\0'; }
     convoy_cfg_set(s_cvw_room, s_cvw_call);
-    snprintf(s_cvw_url, sizeof(s_cvw_url), "%s/convoys/%s/members.json",
-             CONVOY_WIFI_DB_HOST, s_cvw_room);
+    cvw_build_room_urls();
     s_cvw_last_rx = 0;
-    Serial.printf("[CVW] linked by app: room=%s self=%s\n", s_cvw_room, s_cvw_call);
+    Serial.printf("[CVW] linked: room=%s self=%s (%s)\n", s_cvw_room, s_cvw_call,
+                  app_changed_call ? "callsign from app" : "callsign kept from device");
 }
 
 // Withdraw from the board list. Called when the pairing window closes and when
@@ -240,6 +348,8 @@ static bool convoy_wifi_begin(void) {
     s_cvw_joined = s_cvw_begun = false;
     s_cvw_last_rx = 0;
     s_cvw_next_poll = 0;
+    s_cvw_next_pub  = 0;
+    s_cvw_published = 0;
 
     convoy_cfg_get_room(s_cvw_room, sizeof(s_cvw_room));
     convoy_cfg_get_callsign(s_cvw_call, sizeof(s_cvw_call));
@@ -259,8 +369,7 @@ static bool convoy_wifi_begin(void) {
     }
     s_cvw_joined = true;
 
-    snprintf(s_cvw_url, sizeof(s_cvw_url), "%s/convoys/%s/members.json",
-             CONVOY_WIFI_DB_HOST, s_cvw_room);
+    cvw_build_room_urls();
     snprintf(s_cvw_pair_url, sizeof(s_cvw_pair_url), "%s/devices/%s.json",
              CONVOY_WIFI_DB_HOST, s_cvw_dev_id);
     s_cvw_client.setInsecure();          // same posture as the OTA client
@@ -303,6 +412,15 @@ static void convoy_wifi_loop(void) {
     }
 
     if (!s_cvw_room[0]) return;         // nothing to poll until we are linked
+
+    // Publish before polling. Both share one TLS connection, and writing first
+    // means the roster we then read already contains our current position —
+    // which keeps our own entry consistent with what the other cars just saw.
+    if ((int32_t)(now - s_cvw_next_pub) >= 0) {
+        s_cvw_next_pub = now + CONVOY_WIFI_PUB_MS;
+        convoy_wifi_publish();
+    }
+
     if ((int32_t)(now - s_cvw_next_poll) < 0) return;
     s_cvw_next_poll = now + CONVOY_WIFI_POLL_MS;
 

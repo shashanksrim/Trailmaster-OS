@@ -18,6 +18,10 @@
 #include "retro_engine.h"
 #include "screen_inclinometer.h"
 #include "convoy_ui.h"   // shared convoy/tracker radar (same header the sim renders)
+#include "gps.h"         // on-board NEO-M9N over I2C 0x42 (parser in gps_parse.h)
+#include "mag_mmc5983.h" // MMC5983MA magnetometer on the GPS extension header (I2C 0x30)
+#include "mag_heading.h" // tilt-compensated compass heading (needs the IMU angles)
+#include "gps_convoy.h"  // local fix -> convoy_set_self/_heading (outranks all sources)
 #include "convoy_link.h" // BLE client to the co-located Meshtastic T-Beam (NimBLE 2.x)
 #include "convoy_net.h"  // BLE peripheral: phone (Web Bluetooth) pushes the convoy roster
 #include "convoy_wifi.h" // WiFi STA: board pulls the roster from Firebase itself
@@ -27,6 +31,7 @@
 #include "sd_card_bsp.h"
 #include "OTAManager.h"
 #include "obd_parse.h"   // pure OBD-II PID parsers (also unit-tested on host)
+#include "obd_ble.h"     // ELM327 over BLE (FFF0/FFF1) — the alternative source
 #include <dirent.h>
 #include <unistd.h>
 #include <FFat.h>
@@ -138,168 +143,78 @@ void switch_to_launcher();
 void force_full_ui_redraw(lv_obj_t * target_scr);
 void build_grid_launcher();
 static void convoy_cancel_loads(void);   // defined with the convoy loaders, used by loop()
-extern void pf_show_upload_overlay(void);
+extern void pf_show_upload_overlay(bool wifi_only);
+extern void pf_show_wifi_menu(void);
 extern bool pf_autostart_wifi;   // defined in PhotoFrameApp.cpp
 
 // --- SHARED UI LOGIC ---
 bool ignore_until_lift = false;
 
-// --- OBD Wi-Fi Connectivity Configuration ---
-const char* obd_ssid = "WiFi_OBDII"; 
-const char* obd_ip = "192.168.0.10";
-const uint16_t obd_port = 35000;
 
-void read_obd_response(WiFiClient& client, char* buffer, size_t max_len) {
-    unsigned long timeout = millis() + 1500; 
-    int len = 0;
-    while (millis() < timeout) {
-        if (client.available()) {
-            char c = client.read();
-            if (c == '\r' || c == '\n') continue; 
-            if (c == '>') { buffer[len] = '\0'; break; }
-            if (len < max_len - 1) buffer[len++] = c;
-        }
-        vTaskDelay(pdMS_TO_TICKS(1)); 
-    }
-    buffer[len] = '\0';
-}
+
 
 void obdBackgroundWorker(void *pvParameters) {
-    WiFiClient client;
-    char rx_buf[64];
-    uint32_t loop_counter = 0;
-    
     extern bool wifi_ap_running;
     while(1) {
         // Yield if we are in other heavy modes, if AP is running, or if OTA is active to prevent resource/WiFi conflicts
         const OTAStatus* ota_st = ota_get_status();
-        // Tracker radio mode: release WiFi entirely so BLE can own the radio.
-        if (convoy_radio_mode) {
-            // The Tracker wants the radio. This worker is the ONLY task that touches
-            // WiFi, so the whole teardown happens HERE and the ack means "WiFi is
-            // off" — not "I asked it to stop". convoyLinkTask used to power WiFi down
-            // itself, from a different task, after a fixed 4s wait, while this worker
-            // could still be blocked inside a 10s WiFi.begin(). That handover race is
-            // what left NimBLE initialising at ~46KB free.
-            if (!convoy_obd_released) {
-                if (ota_st->state != OTA_IDLE) {
-                    // Never pull WiFi out from under an update. Withholding the ack
-                    // makes the Tracker report "Radio unavailable" instead.
-                    vTaskDelay(pdMS_TO_TICKS(250));
-                    continue;
-                }
-                if (client.connected()) { client.stop(); }
-                WiFi.disconnect(true, true);
-                if (wifi_ap_running) { WiFi.softAPdisconnect(true); }
-                if (!convoy_wifi_mode) {
-                    WiFi.mode(WIFI_OFF);
-                    vTaskDelay(pdMS_TO_TICKS(200));   // let the stack settle before NimBLE
-                }
-                Serial.printf("[OBD] WiFi released for Tracker%s (internal RAM=%u)\n",
-                              convoy_wifi_mode ? " (STA kept up)" : "",
-                              heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-                convoy_obd_released = true;       // ack: the radio is genuinely free
+
+        // ── BLE telemetry source ────────────────────────────────────────────
+        // One radio in use at a time, by choice rather than by necessity.
+        //
+        // BLE and WiFi DO coexist here — measured 2026-08-05 in this firmware:
+        // 201,992 free internal -> 138,812 after NimBLE init -> ~85,700 with the
+        // ELM327 client connected, against WiFi STA's 42 KB. Proven end to end
+        // with BLE OBD, WiFi, a TLS session and the Firebase roster all live at
+        // once. So the radio-handover handshake below is deletable.
+        //
+        // It is deliberately still here: retiring it is its own change, and
+        // keeping it means a regression in the convoy paths cannot be blamed on
+        // this. Until then the telemetry link stands down whenever the Tracker,
+        // the setup portal, the photo frame or an OTA wants the radio.
+        static bool wifi_parked = false;
+        const bool someone_else_wants_the_radio =
+            convoy_radio_mode ||                       // Tracker: BLE roles or its own WiFi
+            currentMode == MODE_PHOTOFRAME ||
+            currentMode == MODE_EMULATOR ||
+            wifi_ap_running ||                          // setup portal
+            ota_st->state != OTA_IDLE;
+
+        if (someone_else_wants_the_radio) {
+            if (obd_ble_state() != OBD_BLE_DOWN) {
+                Serial.println("[OBD] BLE link down — radio handed over");
+                obd_ble_end();
             }
-            vTaskDelay(pdMS_TO_TICKS(500));
+            wifi_parked = false;
+            // The ack means "the radio is yours". With a BLE source we are
+            // not holding WiFi at all, so it is true as soon as our own BLE
+            // link is gone — no WiFi teardown to wait for.
+            convoy_obd_released = true;
+            vTaskDelay(pdMS_TO_TICKS(300));
             continue;
         }
         convoy_obd_released = false;
-        if (currentMode == MODE_PHOTOFRAME || currentMode == MODE_EMULATOR || wifi_ap_running || ota_st->state != OTA_IDLE) {
-            if (client.connected()) { client.stop(); }
-            if (!wifi_ap_running && ota_st->state == OTA_IDLE) {
+
+        // Reclaiming the radio: WiFi may still be up from the portal, an OTA
+        // or a previous WiFi-OBD session. Drop it once, so NimBLE gets its
+        // buffers from an uncontended heap rather than the 21-47 KB that
+        // used to make convoy_ble_init() fail.
+        if (!wifi_parked) {
+            if (WiFi.getMode() != WIFI_OFF) {
                 WiFi.disconnect(true, true);
+                WiFi.mode(WIFI_OFF);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                Serial.printf("[OBD] WiFi parked for BLE source (internal RAM=%u)\n",
+                              heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             }
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
+            wifi_parked = true;
         }
-        
-        // Ensure WiFi Connection in Station Mode
-        if (WiFi.status() != WL_CONNECTED) {
-            // Check one more time before committing to a 10s blocking WiFi attempt
-            if (ota_st->state != OTA_IDLE) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                continue;
-            }
-            Serial.println("[OBD] Connecting to WiFi_OBDII...");
-            WiFi.disconnect(true, true);
-            vTaskDelay(pdMS_TO_TICKS(100));
-            WiFi.mode(WIFI_STA);
-            esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
-            IPAddress local_IP(192, 168, 0, 11);
-            IPAddress gateway(192, 168, 0, 10);
-            IPAddress subnet(255, 255, 255, 0);
-            WiFi.config(local_IP, gateway, subnet);
-            WiFi.begin(obd_ssid);
-            int attempts = 0;
-            while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-                if (ota_get_status()->state != OTA_IDLE) {
-                    break;
-                }
-                // Bail out the moment the Tracker asks for the radio. Sitting out the
-                // full 10s here is the other half of the handover race: the request
-                // would go unseen long past the point convoyLinkTask gave up waiting.
-                if (convoy_radio_mode) {
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(500));
-                attempts++;
-            }
-            if (WiFi.status() != WL_CONNECTED) {
-                Serial.println("[OBD] WiFi Connection Failed!");
-                vTaskDelay(pdMS_TO_TICKS(2000));
-                continue; 
-            }
-            Serial.println("[OBD] WiFi Connected!");
+
+        if (obd_ble_service()) {
+            bool gauge_active = (ui_uigauge != NULL && lv_scr_act() == ui_uigauge);
+            obd_ble_poll(gauge_active);
         }
-        
-        // Ensure TCP Client Connection to OBD ELM327 Hotspot
-        if (!client.connected()) {
-            Serial.println("[OBD] Connecting to ELM327 TCP port...");
-            if (client.connect(obd_ip, obd_port)) {
-                Serial.println("[OBD] ELM327 TCP Port Connected! Initializing adapter...");
-                client.print("ATZ\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                client.print("ATE E0\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-                vTaskDelay(pdMS_TO_TICKS(100));
-            } else { 
-                Serial.println("[OBD] Connection to ELM327 Failed!");
-                vTaskDelay(pdMS_TO_TICKS(1000)); 
-                continue; 
-            }
-        }
-        
-        // --- DYNAMIC SCREEN-BASED SELECTIVE POLL OBD OPTIMIZER ---
-        bool is_gauge_active = (ui_uigauge != NULL && lv_scr_act() == ui_uigauge);
-
-        if (is_gauge_active) {
-            // Read Coolant Temperature (PID 0105)
-            client.print("0105\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_coolant(rx_buf, (int*)&car_engine_temp);
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-            // Read Engine Load (PID 0104)
-            client.print("0104\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_load(rx_buf, (int*)&car_engine_load);
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-            // Read Battery Voltage (ATRV)
-            client.print("ATRV\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_voltage(rx_buf, (float*)&car_voltage);
-            vTaskDelay(pdMS_TO_TICKS(10));
-        } else {
-            // Read Engine RPM (PID 010C)
-            client.print("010C\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_rpm(rx_buf, (int*)&car_rpm);
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-            // Read Vehicle Speed (PID 010D)
-            client.print("010D\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_speed(rx_buf, (int*)&car_speed);
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        
-        loop_counter++;
-        vTaskDelay(pdMS_TO_TICKS(20)); 
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -529,7 +444,7 @@ void build_settings_screen() {
     lv_obj_align(arrow_wifi, LV_ALIGN_RIGHT_MID, -18, 0);
 
     lv_obj_add_event_cb(row_wifi, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // saved networks | configure
     }, LV_EVENT_ALL, NULL);
 
     make_settings_section_header(scr_rows, "MODES");
@@ -1059,9 +974,10 @@ void build_about_screen() {
     lv_obj_add_flag(lbl_wifi, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(lbl_wifi, 24);            // easier to tap
 
-    extern void pf_show_upload_overlay(void);
+    extern void pf_show_upload_overlay(bool wifi_only);
+    extern void pf_show_wifi_menu(void);
     lv_obj_add_event_cb(lbl_wifi, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // saved networks | configure
     }, LV_EVENT_ALL, NULL);
 
     // "Check for Update" opens the OTA overlay; all status/progress shows there.
@@ -1653,8 +1569,15 @@ void setup() {
         use_jimny_logo = p.getInt("jimny_logo", 0); // Default to 0 (Trailmaster)
         use_grid_launcher = p.getInt("grid_launcher", 1); // Default to 1 (Grid launcher on)
         tracker_enabled = p.getInt("tracker_en", 1) ? true : false; // Default ON
+        // Same namespace, and read here rather than left to load_speedo_preferences()
+        // finding a caller: "Set as default" saved to NVS correctly, but NOTHING
+        // ever read it back, so default_speedometer kept its initialiser 0 every
+        // boot and the choice silently never applied. Read before show_boot_splash()
+        // — the boot-screen decision downstream keys off this value.
+        default_speedometer = p.getInt("def_speedo", 0);
         p.end();
-        Serial.printf("[SETTINGS] Pre-splash: grid_launcher = %d, jimny_logo = %d\n", use_grid_launcher, use_jimny_logo);
+        Serial.printf("[SETTINGS] Pre-splash: grid_launcher = %d, jimny_logo = %d, def_speedo = %d\n",
+                      use_grid_launcher, use_jimny_logo, default_speedometer);
     }
     
     lv_obj_t * splash = show_boot_splash(); 
@@ -1817,7 +1740,16 @@ void setup() {
     if (ui_uiScreenGame) lv_obj_add_event_cb(ui_uiScreenGame, app_dino_jump_trigger, LV_EVENT_PRESSED, NULL);
 
     // Spawn core-0 dedicated OBD background telemetry parsing engine
-    xTaskCreatePinnedToCore(obdBackgroundWorker, "OBD_Task", 8192, NULL, 1, NULL, 0);
+    // The BLE path runs a NimBLE client, a GATT scan and the ELM327 conversation
+    // on this task; 8 KB was sized for the old WiFi/TCP path and overflows.
+    xTaskCreatePinnedToCore(obdBackgroundWorker, "OBD_Task", 12288, NULL, 1, NULL, 0);
+
+    // On-board NEO-M9N GPS (I2C 0x42, shares the touch bus). Must come after
+    // Touch_Init() installed the I2C driver. Unlike the convoy link this runs
+    // for the whole session rather than per-screen: a position is useful to the
+    // speedometer and the clock too, and it costs ~1.5% of the bus.
+    gps_begin();
+    mag_begin();   // MMC5983MA on the GPS extension header; same bus, after Touch_Init()
     // NOTE: the Convoy BLE link is NOT started here — it spins up only when the
     // user opens the Tracker screen (convoy_open_screen) and is torn down on exit,
     // so BLE never competes with WiFi/OBD for internal RAM during normal use.
@@ -1837,11 +1769,19 @@ void setup() {
         // Empty SD card? (browser-flash leaves NVS creds intact, so also key off
         // missing SD content — trailmaster.bmp is part of the standard SD set.)
         FILE* fc = fopen("/sd_card/trailmaster.bmp", "r");
-        bool sd_missing = (fc == NULL);
+        (void)fc;   // SD presence no longer gates Wi-Fi onboarding
         if (fc) fclose(fc);
-        if (no_creds || sd_missing) {
+        // Wi-Fi onboarding keys off Wi-Fi state ONLY.
+        //
+        // This was `no_creds || sd_missing`, which opened the setup overlay on
+        // every boot whenever /sd_card/trailmaster.bmp was absent — regardless of
+        // how many networks were saved. The SD check was meant as a proxy for
+        // "freshly browser-flashed", but it fires when that one file is deleted,
+        // renamed, or the card is simply used for something else. Whether the
+        // photo set is on the card says nothing about whether Wi-Fi is set up.
+        if (no_creds) {
             pf_autostart_wifi = true;
-            pf_show_upload_overlay();   // overlay sits over the speedometer; X reveals it
+            pf_show_upload_overlay(true);   // first run: Wi-Fi setup; overlay sits over the speedometer; X reveals it
         }
         lv_timer_del(t);
     }, 2000, NULL);
@@ -1854,6 +1794,8 @@ void loop() {
     last_tick = millis();
 
     if (launcher_pending) { launcher_pending = false; switch_to_launcher(); }
+
+    mag_debug_tick();   // TEMPORARY: compass bring-up diagnostics, 2 s cadence
 
     if (currentMode != MODE_EMULATOR) {
         lv_timer_handler();
@@ -2199,6 +2141,35 @@ static void convoyLinkTask(void * arg) {
         }
         if (running == CVS_SCAN || running == CVS_MESH) convoy_link_loop();
         else if (running == CVS_CLOUD)                  convoy_wifi_loop();
+
+        // Name the live link on the card. Mesh/phone/cloud all render the same
+        // radar, so without this an empty scope gives no clue whether the source
+        // is wrong, the room code is wrong, or the link is simply down.
+        {
+            char room[CONVOY_CFG_ROOM_MAX] = {0};
+            char call[CONVOY_CFG_CALL_MAX] = {0};
+            convoy_cfg_get_callsign(call, sizeof(call));
+            convoy_set_self_name(call);      // radar + order list show the callsign
+            switch (running) {
+                case CVS_SCAN:
+                case CVS_MESH:
+                    convoy_set_link("MESH", NULL,
+                                    convoy_link_status() == CONVOY_LINK_ONLINE);
+                    break;
+                case CVS_PHONE:
+                    convoy_set_link("PHONE", NULL, convoy_ble_up());
+                    break;
+                case CVS_CLOUD:
+                    convoy_cfg_get_room(room, sizeof(room));
+                    convoy_set_link("WIFI", room[0] ? room : "--",
+                                    WiFi.status() == WL_CONNECTED);
+                    break;
+                default:
+                    convoy_set_link(NULL, NULL, false);
+                    break;
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     if (running == CVS_SCAN || running == CVS_MESH) convoy_link_end();
@@ -2488,6 +2459,14 @@ static void convoy_mock_tick(lv_timer_t * t) {
     // The radar only leaves the waiting panel once a position arrives, so a linked
     // T-Beam sitting indoors (Meshtastic reports 0,0 = no fix) looked identical to
     // "never connected". Report the link state separately from the fix state.
+    // Local GPS drives our own position, at UI rate rather than at whatever
+    // cadence the selected source polls. Deliberately gated on a source being
+    // armed: convoy_refresh() keys the waiting panel — the ONLY tap-through to
+    // the source picker — on !convoy_self_fix, so feeding a fix before the user
+    // has chosen a source would hide the picker and strand them. Auto-arm fires
+    // within ~700ms of entry, so in practice this costs nothing.
+    if (convoy_src_sel != CVS_NONE) gps_feed_convoy_self();
+
     static const char * wait_shown = NULL;
     const char * line = "Waiting for Mesh/Phone";
     const char * cta  = "Tap to choose source";

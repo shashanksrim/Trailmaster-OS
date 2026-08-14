@@ -41,10 +41,19 @@ static inline bool convoy_ble_up(void) { return s_convoy_ble_up; }
 // Which incarnation of the stack is current; see s_convoy_ble_gen.
 static inline uint32_t convoy_ble_gen(void) { return s_convoy_ble_gen; }
 
+// How many independent subsystems currently need the stack. Added 2026-08-05
+// when the OBD source moved to BLE (obd_ble.h): the telemetry link and the
+// convoy Tracker are now two unrelated owners of one NimBLE stack, and whoever
+// finished first used to call deinit(true) and free the OTHER one's client —
+// the same class of dangling-pointer crash s_convoy_ble_gen was added for, but
+// across subsystems instead of across roles. The stack now goes down only when
+// the LAST owner lets go.
+static int s_convoy_ble_refs = 0;
+
 // Bring the stack up. Returns false (without crashing) if the controller can't
 // be initialised — caller must NOT make any further NimBLE calls.
 static bool convoy_ble_init(const char *name) {
-    if (s_convoy_ble_up) return true;
+    if (s_convoy_ble_up) { s_convoy_ble_refs++; return true; }
     unsigned internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (!NimBLEDevice::init(name)) {
         Serial.printf("[CVY] BLE init FAILED — controller out of memory "
@@ -52,17 +61,31 @@ static bool convoy_ble_init(const char *name) {
         return false;
     }
     s_convoy_ble_up = true;
+    s_convoy_ble_refs = 1;
     Serial.printf("[CVY] BLE up (internal RAM %u -> %u)\n", internal,
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     return true;
 }
 
-// Tear the stack down. Safe to call when it was never up.
+// Tear the stack down — but only once every owner has released it. Safe to call
+// when it was never up.
 static void convoy_ble_deinit(void) {
     if (!s_convoy_ble_up) return;
+    if (s_convoy_ble_refs > 0) s_convoy_ble_refs--;
+    if (s_convoy_ble_refs > 0) {
+        Serial.printf("[CVY] BLE still held by %d other owner(s) — not tearing down\n",
+                      s_convoy_ble_refs);
+        return;
+    }
     NimBLEDevice::deinit(true);
     s_convoy_ble_up = false;
     s_convoy_ble_gen++;      // everything the stack owned is now freed
 }
+
+// Explicit names for the refcounted pair. The convoy paths keep calling
+// init/deinit (their call sites are already balanced); new owners should use
+// these so the shared-ownership contract is obvious at the call site.
+static inline bool convoy_ble_acquire(const char *name) { return convoy_ble_init(name); }
+static inline void convoy_ble_release(void)             { convoy_ble_deinit(); }
 
 #endif // CONVOY_BLE_GUARD_H

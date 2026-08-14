@@ -24,6 +24,7 @@
 #include <string>
 #include "convoy_ui.h"
 #include "convoy_ble_guard.h"   // convoy_ble_init/up/deinit — never crash on a failed radio
+#include "gps.h"                // gps_has_fix() — the local receiver outranks the T-Beam
 
 #define CONVOY_AUTOBIND 0   // diagnostic: scan+log only, don't connect yet
 #define CONVOY_BENCH_MAC "a4:f0:0f:d8:c8:1a"  // bench: connect straight to C2
@@ -167,10 +168,20 @@ static void convoy_parse_position(pb_t pos, uint32_t num) {
     bool valid = (lat != 0.0 || lon != 0.0);
     n->lat = lat; n->lon = lon; n->has_pos = valid; n->last_ms = millis();
     if (num == s_my_num) {
-        convoy_set_self(lat, lon, valid);
-        convoy_self_updates++;                 // field-debug: own-position packets
-        if (valid && track >= 0) convoy_set_heading(track, moving);
-        Serial.printf("[CVY] self %.6f,%.6f fix=%d trk=%.0f mv=%d\n", lat, lon, valid, track, moving);
+        // The board's own receiver outranks the T-Beam's. This matters most
+        // off-grid: the T-Beam usually rides inside the cabin, so it is the node
+        // most likely to report 0,0 for want of sky view — exactly the case the
+        // waiting panel calls "Mesh linked - no GPS fix". With a local fix we
+        // have a position even when the mesh radio does not.
+        // n->lat/lon are still updated above, so the node roster stays truthful.
+        if (!gps_has_fix()) {
+            convoy_set_self(lat, lon, valid);
+            convoy_self_updates++;             // field-debug: own-position packets
+            if (valid && track >= 0) convoy_set_heading(track, moving);
+        }
+        Serial.printf("[CVY] self %.6f,%.6f fix=%d trk=%.0f mv=%d%s\n",
+                      lat, lon, valid, track, moving,
+                      gps_has_fix() ? " (local GPS wins)" : "");
     } else {
         Serial.printf("[CVY] node %04X %s %.6f,%.6f fix=%d\n", (unsigned)(num & 0xFFFF), n->name, lat, lon, valid);
     }

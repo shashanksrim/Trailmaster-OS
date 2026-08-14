@@ -32,6 +32,8 @@ void ota_init();
 void ota_add_network(const char* ssid, const char* password);
 void ota_remove_network(const char* ssid);
 int  ota_list_networks(char ssids[][33], int max_count); // returns count
+// Saved networks WITH passwords, for the on-device settings page. Returns count.
+int  ota_list_networks_full(char ssids[][33], char passes[][65], int max_count);
 
 // Join the first reachable saved network in pure STA mode. Same tested path the
 // updater uses, minus the set_status() calls — so a caller that just needs WiFi

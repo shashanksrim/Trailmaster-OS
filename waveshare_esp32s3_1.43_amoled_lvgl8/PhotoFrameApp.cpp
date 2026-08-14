@@ -253,6 +253,8 @@ static bool upload_overlay_open = false;
 static uint32_t upload_overlay_opened_ms = 0;
 
 bool wifi_ap_running = false;
+// Which flavour of the overlay is showing — see pf_show_upload_overlay().
+static bool pf_overlay_wifi_only = false;
 bool pf_autostart_wifi = false;  // when true, the WiFi overlay opens with the hotspot ON
 static uint32_t menu_opened_time = 0;
 
@@ -271,7 +273,7 @@ static int pf_total_pages(void);
 static int pf_upload_page_idx(void);
 static bool pf_is_upload_page(int page_idx);
 static void pf_build_upload_gateway_page(lv_obj_t * parent);
-void pf_show_upload_overlay(void);
+void pf_show_upload_overlay(bool wifi_only);
 static void pf_close_upload_overlay(void);
 static void pf_navigate_to_page(int page_idx);
 static void pf_on_page_settled(int page_idx);
@@ -316,22 +318,170 @@ static void pf_build_upload_gateway_page(lv_obj_t * parent) {
     lv_obj_center(lbl);
     lv_obj_add_event_cb(btn, [](lv_event_t * e) {
         if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-        pf_show_upload_overlay();
+        pf_show_upload_overlay(false);   // photo upload gateway: keeps the toggle
     }, LV_EVENT_CLICKED, NULL);
 }
 
-void pf_show_upload_overlay(void) {
+// wifi_only = opened for Wi-Fi setup (settings, first run) rather than to
+// upload photos. Those two want genuinely different screens:
+//
+//   wifi_only  no toggle, hotspot starts by itself, large QR
+//   photos     "Enable Wi-Fi" toggle, small QR
+//
+// The toggle exists because auto-starting the AP left the display garbled after
+// the overlay closed. Investigation (WIFI_TOGGLE_INVESTIGATION.md) found that
+// was never a radio/LVGL collision: it was a DROPPED FLUSH, a full 466x466 frame
+// against a 4092-byte max_transfer_sz, and it is fixed in amoled.cpp by banding.
+//
+// It is dropped only for wifi_only because that case is structurally immune
+// regardless: the full-frame redraw comes from pf_invalidate_full_screen(),
+// which early-returns unless the PHOTO screen is active. From settings or first
+// run it never runs, so the failure mode cannot occur. The photo path keeps the
+// toggle until Firebase photo sync retires AP uploads altogether.
+// ── Wi-Fi settings menu ─────────────────────────────────────────────────────
+// "Wifi settings" used to drop you straight onto the QR code. That is the right
+// destination when you are ADDING a network, but it is the wrong one when the
+// question is "what does this thing already know?" — and after a failed drive
+// that is the more common question. Debugging a non-connecting board on
+// 2026-08-12 meant a USB serial capture purely to read back the stored SSIDs,
+// which is a thing the device already knows and should simply show.
+//
+// So: a two-item menu. Saved networks first (inspect), configure second (change).
+static lv_obj_t *pf_wifi_menu = NULL;
+
+static void pf_close_wifi_menu(lv_event_t *e) {
+    (void)e;
+    if (pf_wifi_menu) { lv_obj_del(pf_wifi_menu); pf_wifi_menu = NULL; }
+}
+
+// Full-screen sheet with the app's standard X, used by both pages below.
+static lv_obj_t *pf_wifi_sheet(const char *title) {
+    lv_obj_t *ov = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(ov, 466, 466);
+    lv_obj_set_style_bg_color(ov, lv_color_hex(0x05080D), 0);
+    lv_obj_set_style_bg_opa(ov, 255, 0);
+    lv_obj_set_style_border_width(ov, 0, 0);
+    lv_obj_clear_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(ov);
+
+    lv_obj_t *x = lv_btn_create(ov);
+    lv_obj_set_size(x, 60, 60);
+    lv_obj_set_style_radius(x, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(x, lv_color_hex(0x333333), 0);
+    lv_obj_align(x, LV_ALIGN_TOP_MID, 0, 22);
+    lv_obj_set_ext_click_area(x, 36);
+    lv_obj_t *lx = lv_label_create(x);
+    lv_label_set_text(lx, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(lx, &lv_font_montserrat_20, 0);
+    lv_obj_center(lx);
+    lv_obj_add_event_cb(x, pf_close_wifi_menu, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *t = lv_label_create(ov);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(0xFF6A00), 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 92);
+    return ov;
+}
+
+// A settings-style row (400x80 elsewhere; 356 here so the corners clear the
+// round bezel, same trim as the convoy order list).
+static lv_obj_t *pf_wifi_row(lv_obj_t *parent, const char *title, const char *sub) {
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, 356, 80);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(row, 255, 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(row, 12, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *t = lv_label_create(row);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 6, sub && sub[0] ? -13 : 0);
+
+    if (sub && sub[0]) {
+        lv_obj_t *sl = lv_label_create(row);
+        lv_label_set_text(sl, sub);
+        lv_obj_set_style_text_font(sl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(sl, lv_color_hex(0x888888), 0);
+        lv_obj_align(sl, LV_ALIGN_LEFT_MID, 6, 14);
+    }
+    return row;
+}
+
+// Page 2: what the board actually has stored, passwords included. Showing them
+// in clear is deliberate — this is a private dash, and a settings page that hid
+// the one field you need to verify would just send you back to a serial cable.
+static void pf_show_saved_networks(lv_event_t *e) {
+    (void)e;
+    pf_close_wifi_menu(NULL);
+    lv_obj_t *ov = pf_wifi_sheet("SAVED NETWORKS");
+    pf_wifi_menu = ov;
+
+    lv_obj_t *box = lv_obj_create(ov);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, 376, 272);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 130);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 8, 0);
+    lv_obj_set_scroll_dir(box, LV_DIR_VER);
+
+    char ssids[8][33], passes[8][65];
+    int n = ota_list_networks_full(ssids, passes, 8);
+    if (n == 0) {
+        lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *m = lv_label_create(box);
+        lv_label_set_text(m, "No networks saved.\nUse Configure to add one.");
+        lv_obj_set_style_text_font(m, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(m, lv_color_hex(0x8CA6B6), 0);
+        lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+        return;
+    }
+    for (int i = 0; i < n; i++) pf_wifi_row(box, ssids[i], passes[i]);
+}
+
+static void pf_open_wifi_qr(lv_event_t *e) {
+    (void)e;
+    pf_close_wifi_menu(NULL);
+    pf_show_upload_overlay(true);
+}
+
+void pf_show_wifi_menu(void) {
+    if (pf_wifi_menu) return;
+    lv_obj_t *ov = pf_wifi_sheet("WI-FI");
+    pf_wifi_menu = ov;
+
+    lv_obj_t *box = lv_obj_create(ov);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, 376, 200);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 140);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 10, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *r1 = pf_wifi_row(box, "Saved networks", "View stored SSIDs and passwords");
+    lv_obj_add_flag(r1, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(r1, pf_show_saved_networks, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *r2 = pf_wifi_row(box, "Configure", "Scan the QR to add a network");
+    lv_obj_add_flag(r2, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(r2, pf_open_wifi_qr, LV_EVENT_CLICKED, NULL);
+}
+
+void pf_show_upload_overlay(bool wifi_only) {
     if (upload_overlay_open) return;
     upload_overlay_open = true;
     upload_overlay_opened_ms = lv_tick_get();
     pf_carousel_dirty = false;
-
-    // amoled.fillScreen(AMOLED_COLOR_BLACK);
-    // start_photoframe_wifi(); // Deferred until user toggles switch to avoid LVGL rendering collision
+    pf_overlay_wifi_only = wifi_only;
 
     pf_upload_overlay = lv_obj_create(lv_scr_act());
     lv_obj_set_size(pf_upload_overlay, 466, 466);
-    lv_obj_set_style_bg_color(pf_upload_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(pf_upload_overlay,
+                              lv_color_hex(wifi_only ? 0xFFFFFF : 0x000000), 0);
     lv_obj_set_style_bg_opa(pf_upload_overlay, 255, 0);
     lv_obj_set_style_border_width(pf_upload_overlay, 0, 0);
     lv_obj_clear_flag(pf_upload_overlay, LV_OBJ_FLAG_SCROLLABLE);
@@ -344,7 +494,7 @@ void pf_show_upload_overlay(void) {
     lv_obj_t * btn_close = lv_btn_create(pf_upload_overlay);
     lv_obj_set_size(btn_close, 72, 72);
     lv_obj_set_style_radius(btn_close, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(btn_close, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_bg_color(btn_close, lv_color_hex(wifi_only ? 0x1A1A1A : 0x444444), 0);
     lv_obj_align(btn_close, LV_ALIGN_TOP_MID, 0, 30);
     lv_obj_set_ext_click_area(btn_close, 36);   // large invisible tap target beyond the visible circle
     lv_obj_move_foreground(btn_close);
@@ -370,23 +520,41 @@ void pf_show_upload_overlay(void) {
     // and resampling a bitmap QR by a non-integer factor smears module edges
     // until a camera cannot resolve them. Never scale this by a non-integer
     // factor; if it ever needs to be bigger, regenerate it or use 512 (2x).
-    extern const lv_img_dsc_t wifi_qrcode;
+    // Large variant where the toggle row is gone, small where it stays.
+    extern const lv_img_dsc_t wifi_qrcode;      // 222x222, 6px modules
+    extern const lv_img_dsc_t wifi_qrcode_lg;   // 259x259, 7px modules
     lv_obj_t * qr_img = lv_img_create(pf_upload_overlay);
-    lv_img_set_src(qr_img, &wifi_qrcode);
-    lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, -10);   // 222px: clears the close button and the toggle row
+    lv_img_set_src(qr_img, wifi_only ? &wifi_qrcode_lg : &wifi_qrcode);
+    lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, wifi_only ? 10 : -10);
 
+    if (wifi_only) {
+    // No toggle here: opening Wi-Fi setup IS the request to turn the hotspot on,
+    // so asking again is a step with no decision behind it — and the row it
+    // occupied is what lets the QR be comfortably scannable.
+    //
+    // Safe in THIS context specifically. The garble the toggle guards against is
+    // a dropped full-frame flush, and that full redraw comes from
+    // pf_invalidate_full_screen(), which early-returns unless the PHOTO screen is
+    // active. From settings or first run it cannot happen at all. (The overflow
+    // behind it is also fixed in amoled.cpp by banding transfers — see
+    // WIFI_TOGGLE_INVESTIGATION.md — but this path does not depend on that.)
+    pf_autostart_wifi = false;
+    lv_timer_t * ap_start = lv_timer_create([](lv_timer_t * tm) {
+        start_photoframe_wifi();
+        lv_timer_del(tm);
+    }, 400, NULL);
+    (void)ap_start;
+    } else {
     // Wi-Fi Toggle Switch — wrapped in a flex row so the label+switch pair is
     // centered as a unit (previously the switch was hardcoded at center+50,
     // with the label hung off its left edge, so the whole row sat off-center
     // by however wide the label happened to render). Switch size matches the
     // Settings screen's toggles (60x30) for consistency.
     //
-    // DO NOT remove this to reclaim space for the QR. It looks redundant — the
-    // overlay is the Wi-Fi screen, so why ask again — and the deferred-start
-    // timer below looks like it would make auto-starting safe. It was tried:
-    // launching the AP automatically from the photo or settings screens garbles
-    // the display after the overlay closes. The extra tap is a deliberate trade
-    // against a bug that is not worth re-opening for thirty pixels.
+    // KEPT for the photo-upload path. Closing over the photo screen DOES trigger
+    // the full-frame redraw that used to be dropped, so the trade that motivated
+    // this toggle still applies here. When Firebase photo sync retires AP
+    // uploads, this branch and the small QR variant go with it.
     lv_obj_t * wifi_row = lv_obj_create(pf_upload_overlay);
     lv_obj_set_size(wifi_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(wifi_row, 0, 0);
@@ -426,17 +594,18 @@ void pf_show_upload_overlay(void) {
         }, 400, NULL);
         (void)t;
     }
+    }   // end !wifi_only
 
     lv_obj_t * hint = lv_label_create(pf_upload_overlay);
     lv_label_set_text(hint, "Wi-Fi: Jimny_Dash_Sync | Pass: password123");
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(wifi_only ? 0x333333 : 0x888888), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(hint, LV_ALIGN_CENTER, 0, 168);
+    lv_obj_align(hint, LV_ALIGN_CENTER, 0, wifi_only ? 155 : 168);
 
     lv_obj_t * cred_lbl = lv_label_create(pf_upload_overlay);
     lv_label_set_text(cred_lbl, "Visit 192.168.4.1");
-    lv_obj_set_style_text_color(cred_lbl, lv_color_hex(0xFF9800), 0);
+    lv_obj_set_style_text_color(cred_lbl, lv_color_hex(wifi_only ? 0xB34700 : 0xFF9800), 0);
     lv_obj_set_style_text_font(cred_lbl, &lv_font_montserrat_14, 0);
     lv_obj_align(cred_lbl, LV_ALIGN_CENTER, 0, 180);
 

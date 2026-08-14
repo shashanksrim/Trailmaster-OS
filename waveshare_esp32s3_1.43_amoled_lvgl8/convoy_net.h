@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include "convoy_ui.h"
 #include "convoy_ble_guard.h"   // convoy_ble_init/up/deinit — never crash on a failed radio
+#include "gps.h"                // gps_has_fix() — the local receiver outranks the phone
 
 // Custom 128-bit UUIDs (also referenced by docs/convoy/app.js — keep in sync).
 // 54524149="TRAI", 4d53="MS", 5452="TR".
@@ -64,6 +65,11 @@ static void convoy_net_parse(const uint8_t *data, size_t len) {
     char *save = nullptr;
     for (char *ln = strtok_r(buf, "\r\n", &save); ln; ln = strtok_r(nullptr, "\r\n", &save)) {
         if (ln[0] == 'S') {
+            // The phone's own fix is only a fallback now: when the board's GPS
+            // has a lock it is fresher and does not depend on the phone's
+            // location permission still being granted. Ignore the S line
+            // entirely in that case rather than letting it overwrite us.
+            if (gps_has_fix()) continue;
             double lat = 0, lon = 0, hdg = -1, spd = 0; int fix = 0;
             if (sscanf(ln, "S,%lf,%lf,%lf,%lf,%d", &lat, &lon, &hdg, &spd, &fix) >= 5) {
                 bool valid = fix != 0 && (lat != 0.0 || lon != 0.0);

@@ -13,6 +13,7 @@
 #include "ota_logic.h"
 #include "obd_parse.h"
 #include "convoy_roster.h"
+#include "gps_parse.h"
 
 // ── tiny test harness ───────────────────────────────────────────────────────
 static int g_pass = 0, g_fail = 0;
@@ -232,6 +233,159 @@ static void test_convoy_normalize_code() {
     CHECK_STR(small, "ABCD", "truncates to fit");
 }
 
+// ── GPS / NMEA parsing ──────────────────────────────────────────────────────
+//
+// Every fixture below is a REAL sentence captured from the NEO-M9N on this
+// board (2026-08-02, Bangalore), not hand-written. That matters: the first
+// version of this parser miscounted GGA's fields and reported "99 satellites"
+// because it read HDOP as the satellite count. Synthetic fixtures would have
+// been written to match the buggy assumption; real ones caught it.
+
+// 0.01 degrees is over a kilometre, so CHECK_FLT is far too loose for a
+// position. Six decimal places is ~11 cm — appropriate for coordinates.
+#define CHECK_COORD(got, want, msg) do { \
+    if (fabs((got) - (want)) < 0.000001) { g_pass++; } \
+    else { g_fail++; printf("  FAIL: %s  got=%.8f want=%.8f (line %d)\n", msg, (double)(got), (double)(want), __LINE__); } \
+} while (0)
+
+static void test_gps_checksum() {
+    const char *good = "$GBGSV,1,1,01,29,,,28,1*76";
+    CHECK(gps_checksum_ok(good, (int)strlen(good)), "valid checksum accepted");
+
+    // One digit flipped in the payload must invalidate it.
+    const char *bad = "$GBGSV,1,1,02,29,,,28,1*76";
+    CHECK(!gps_checksum_ok(bad, (int)strlen(bad)), "corrupted payload rejected");
+
+    // A truncated sentence is the normal failure mode on a shared I2C bus,
+    // where a read can end mid-line. It must never parse as a position.
+    const char *cut = "$GNRMC,182105.00,A,1256.216";
+    CHECK(!gps_checksum_ok(cut, (int)strlen(cut)), "truncated sentence rejected");
+
+    CHECK(!gps_checksum_ok("", 0), "empty rejected");
+    CHECK(!gps_checksum_ok(NULL, 10), "null rejected");
+}
+
+static void test_gps_rmc_with_fix() {
+    gps_fix_t f; gps_fix_reset(&f);
+    const char *rmc = "$GNRMC,182105.00,A,1256.21613,N,07741.94587,E,0.058,,020826,,,A,V*1D";
+    CHECK(gps_parse_line(rmc, &f), "RMC parsed");
+
+    CHECK(f.has_fix, "status A means fix");
+    CHECK_COORD(f.lat, 12.93693550, "latitude decoded");
+    CHECK_COORD(f.lon, 77.69909783, "longitude decoded");
+
+    // 0.058 knots -> m/s. Downstream code is all m/s; RMC is the only place
+    // knots appear, so the conversion has to happen here.
+    CHECK_FLT(f.speed_mps, 0.02983775, "speed knots -> m/s");
+
+    // Course is EMPTY in this fixture because the car was parked. It must come
+    // back as invalid, not as 0.0 — which would render as "heading due north".
+    CHECK(!f.course_valid, "empty course is invalid, not north");
+    CHECK_FLT(f.course_deg, -1.0, "unknown course is negative");
+
+    CHECK_INT(f.hour, 18, "hour"); CHECK_INT(f.minute, 21, "minute");
+    CHECK_INT(f.second, 5, "second");
+    CHECK_INT(f.day, 2, "day"); CHECK_INT(f.month, 8, "month");
+    CHECK_INT(f.year, 2026, "year is 2000-based");
+}
+
+static void test_gps_gga_field_offsets() {
+    gps_fix_t f; gps_fix_reset(&f);
+    const char *gga = "$GNGGA,182105.00,1256.21613,N,07741.94587,E,1,12,1.29,922.8,M,-86.5,M,,*66";
+    CHECK(gps_parse_line(gga, &f), "GGA parsed");
+
+    // The regression that motivated these tests: counting seven commas instead
+    // of six shifted every field right, so quality read as 12, sats as 1 and
+    // HDOP as 922.8. Assert all four to pin the alignment down.
+    CHECK_INT(f.fix_quality, 1,  "quality is field 6");
+    CHECK_INT(f.sats_used,  12,  "sats used is field 7");
+    CHECK_FLT(f.hdop,      1.29, "HDOP is field 8");
+    CHECK_FLT(f.alt_m,    922.8, "altitude is field 9");
+    CHECK_COORD(f.lat, 12.93693550, "GGA latitude");
+}
+
+static void test_gps_no_fix_keeps_position_clean() {
+    gps_fix_t f; gps_fix_reset(&f);
+
+    // Indoor, no fix: empty position fields and the 99.99 "no solution" HDOP.
+    const char *rmc = "$GNRMC,181642.00,V,,,,,,,020826,,,N,V*1F";
+    const char *gga = "$GNGGA,181642.00,,,,,0,00,99.99,,,,,,*70";
+    CHECK(gps_parse_line(rmc, &f), "no-fix RMC parsed");
+    CHECK(gps_parse_line(gga, &f), "no-fix GGA parsed");
+
+    CHECK(!f.has_fix, "status V means no fix");
+    CHECK_INT(f.fix_quality, 0, "quality 0");
+    CHECK_INT(f.sats_used,   0, "no satellites used");
+    CHECK_COORD(f.lat, 0.0, "latitude stays zero without a fix");
+    CHECK_COORD(f.lon, 0.0, "longitude stays zero without a fix");
+
+    // The date still arrives without a fix, from the module's backup battery.
+    CHECK(f.date_valid, "date valid even with no fix");
+    CHECK_INT(f.year, 2026, "backup-battery year");
+}
+
+static void test_gps_sats_in_view_does_not_accumulate() {
+    gps_fix_t f; gps_fix_reset(&f);
+
+    // Satellites in view are reported per constellation. The bug this guards
+    // against summed every GSV as it arrived, so twelve epochs of a 16-sat sky
+    // reported 192. Feeding the SAME epoch repeatedly must be idempotent.
+    const char *gp = "$GPGSV,1,1,00,1*64";
+    const char *gl = "$GLGSV,1,1,00,1*78";
+    const char *ga = "$GAGSV,1,1,00,7*73";
+    const char *gb = "$GBGSV,1,1,01,29,,,28,1*76";
+
+    for (int epoch = 0; epoch < 12; epoch++) {
+        CHECK(gps_parse_line(gp, &f), "GPGSV parsed");
+        gps_parse_line(gl, &f); gps_parse_line(ga, &f); gps_parse_line(gb, &f);
+    }
+    CHECK_INT(f.sats_in_view, 1, "12 epochs still report 1 satellite in view");
+
+    // A constellation coming into view must replace its own count, not add.
+    const char *gp4 = "$GPGSV,1,1,04,14,,,31,17,,,28,20,,,33,30,,,29,1*61";
+    gps_parse_line(gp4, &f);
+    CHECK_INT(f.sats_in_view, 5, "GPS 4 + BeiDou 1 = 5, replacing not adding");
+}
+
+static void test_gps_coordinate_conversion() {
+    gps_fix_t f; gps_fix_reset(&f);
+
+    // ddmm.mmmm vs dddmm.mmmm — latitude takes 2 degree digits, longitude 3.
+    // Using the wrong width silently misplaces you by tens of degrees.
+    CHECK_COORD(gps_ddmm_to_deg("1256.21613", "N", 2),  12.93693550, "lat N");
+    CHECK_COORD(gps_ddmm_to_deg("07741.94587", "E", 3), 77.69909783, "lon E");
+
+    // Southern / western hemispheres negate.
+    CHECK_COORD(gps_ddmm_to_deg("1256.21613", "S", 2), -12.93693550, "lat S negates");
+    CHECK_COORD(gps_ddmm_to_deg("07741.94587", "W", 3), -77.69909783, "lon W negates");
+
+    CHECK_COORD(gps_ddmm_to_deg("", "N", 2), 0.0, "empty is zero");
+    CHECK_COORD(gps_ddmm_to_deg(NULL, "N", 2), 0.0, "null is zero");
+
+    // GSA carries the 2D/3D distinction that GGA's quality does not.
+    const char *gsa = "$GNGSA,A,3,14,17,20,30,22,,,,,,,,2.22,1.29,1.81,1*03";
+    CHECK(gps_parse_line(gsa, &f), "GSA parsed");
+    CHECK_INT(f.nav_mode, 3, "3D fix mode");
+}
+
+static void test_gps_rejects_junk() {
+    gps_fix_t f; gps_fix_reset(&f);
+
+    // A sentence whose checksum fails must not mutate the fix at all —
+    // otherwise a corrupted read silently teleports the car.
+    const char *corrupt = "$GNRMC,182105.00,A,9956.21613,N,07741.94587,E,0.058,,020826,,,A,V*1D";
+    CHECK(!gps_parse_line(corrupt, &f), "bad checksum rejected");
+    CHECK_COORD(f.lat, 0.0, "rejected sentence left position untouched");
+
+    CHECK(!gps_parse_line("", &f), "empty line rejected");
+    CHECK(!gps_parse_line(NULL, &f), "null line rejected");
+
+    // VTG and GLL are emitted by this module but carry nothing we need; they
+    // should be ignored cleanly rather than misparsed.
+    const char *vtg = "$GNVTG,,T,,M,0.058,N,0.107,K,A*36";
+    CHECK(!gps_parse_line(vtg, &f), "unused sentence ignored");
+}
+
 int main() {
     printf("=== Trailmaster-OS unit tests ===\n");
     test_version_is_newer();
@@ -239,6 +393,13 @@ int main() {
     test_obd_parsers();
     test_convoy_roster();
     test_convoy_normalize_code();
+    test_gps_checksum();
+    test_gps_rmc_with_fix();
+    test_gps_gga_field_offsets();
+    test_gps_no_fix_keeps_position_clean();
+    test_gps_sats_in_view_does_not_accumulate();
+    test_gps_coordinate_conversion();
+    test_gps_rejects_junk();
     printf("=================================\n");
     printf("PASS: %d   FAIL: %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

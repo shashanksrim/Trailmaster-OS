@@ -93,12 +93,38 @@ static int nvs_load_networks(char ssids[][33], char passes[][65], int max_count)
     return n;
 }
 
-// SD first (survives a reflash), NVS second (survives a missing card).
+// MERGE both stores, SD first, de-duplicated by SSID.
+//
+// This used to be "SD if non-empty, else NVS", and that shadowing cost a real
+// debugging session (2026-08-12): the SD file held ONE network whose password
+// had gone stale, NVS held a second network that worked, and because SD was
+// non-empty the working credential was never even tried. The board sat at
+// "no saved network reachable" with a perfectly good AP in range.
+//
+// The two stores exist for different failure modes — SD survives a reflash, NVS
+// survives a missing card — so neither is authoritative and picking one is
+// always wrong. Trying both is strictly better: a credential that ever worked
+// stays in the candidate pool, and the scan-ordered connect loop below only
+// costs time on the ones actually in range.
 static int load_networks(char ssids[][33], char passes[][65], int max_count) {
     int n = sd_load_networks(ssids, passes, max_count);
-    if (n > 0) return n;
-    n = nvs_load_networks(ssids, passes, max_count);
-    if (n > 0) Serial.printf("[OTA] SD unavailable — using %d network(s) from NVS\n", n);
+    const int from_sd = n;
+
+    char nssids[OTA_MAX_NETWORKS][33], npasses[OTA_MAX_NETWORKS][65];
+    int m = nvs_load_networks(nssids, npasses, OTA_MAX_NETWORKS);
+    int added = 0;
+    for (int i = 0; i < m && n < max_count; i++) {
+        bool dup = false;
+        for (int j = 0; j < from_sd; j++) if (strcmp(ssids[j], nssids[i]) == 0) { dup = true; break; }
+        if (dup) continue;
+        strncpy(ssids[n], nssids[i], 32);  ssids[n][32]  = '\0';
+        strncpy(passes[n], npasses[i], 64); passes[n][64] = '\0';
+        n++; added++;
+    }
+    Serial.printf("[OTA] credentials: %d from SD + %d new from NVS = %d candidate(s)\n",
+                  from_sd, added, n);
+    for (int i = 0; i < n; i++)
+        Serial.printf("[OTA]   [%d] '%s' (pass %d chars)\n", i, ssids[i], (int)strlen(passes[i]));
     return n;
 }
 
@@ -189,6 +215,22 @@ void ota_remove_network(const char* ssid) {
     Serial.printf("[OTA] Removed network: %s\n", ssid);
 }
 
+// SSIDs *and* passwords, for the on-device "saved networks" page. Separate from
+// ota_list_networks() because that one is used where only names are wanted, and
+// handing passwords to callers that do not need them is how they end up in logs.
+int ota_list_networks_full(char ssids[][33], char passes[][65], int max_count) {
+    migrate_nvs_to_sd();
+    char all_ssids[OTA_MAX_NETWORKS][33]; char all_passes[OTA_MAX_NETWORKS][65];
+    int n = load_networks(all_ssids, all_passes, OTA_MAX_NETWORKS);
+    int count = 0;
+    for (int i = 0; i < n && count < max_count; i++) {
+        strncpy(ssids[count],  all_ssids[i],  32); ssids[count][32]  = '\0';
+        strncpy(passes[count], all_passes[i], 64); passes[count][64] = '\0';
+        count++;
+    }
+    return count;
+}
+
 int ota_list_networks(char ssids[][33], int max_count) {
     migrate_nvs_to_sd();
     char all_ssids[OTA_MAX_NETWORKS][33]; char all_passes[OTA_MAX_NETWORKS][65];
@@ -249,14 +291,22 @@ static bool wifi_connect_saved_core(bool report) {
     int n_try = 0;
     int rssi[OTA_MAX_NETWORKS];
     const int n_scan = WiFi.scanNetworks(false, false);
+    // Dump the whole scan, always. "not seen" on its own cannot distinguish a
+    // typo'd SSID from a 5 GHz-only AP from a genuinely absent one, and this is
+    // the S3: it is 2.4 GHz only, so a dual-band router that a phone or laptop
+    // joins happily may be invisible here. Seeing the actual airspace is the
+    // difference between guessing and knowing.
+    Serial.printf("[OTA] scan sees %d AP(s):\n", n_scan);
+    for (int j = 0; j < n_scan; j++)
+        Serial.printf("[OTA]   '%s' %d dBm ch%d\n",
+                      WiFi.SSID(j).c_str(), (int)WiFi.RSSI(j), (int)WiFi.channel(j));
     if (n_scan > 0) {
         for (int i = 0; i < net_count; i++) {
             rssi[i] = -1000;
             for (int j = 0; j < n_scan; j++)
                 if (WiFi.SSID(j) == ssids[i] && WiFi.RSSI(j) > rssi[i]) rssi[i] = WiFi.RSSI(j);
-            if (report)
-                Serial.printf("[OTA] Saved '%s': %s\n", ssids[i],
-                              rssi[i] > -1000 ? "in range" : "not seen");
+            Serial.printf("[OTA] saved '%s': %s\n", ssids[i],
+                          rssi[i] > -1000 ? "IN RANGE" : "not seen (2.4 GHz only on this chip)");
         }
         for (int i = 0; i < net_count; i++) if (rssi[i] > -1000) order[n_try++] = i;
         for (int a = 1; a < n_try; a++) {          // insertion sort, strongest first
@@ -304,14 +354,28 @@ static bool wifi_connect_saved_core(bool report) {
             return true;
         }
 
-        Serial.printf("[OTA] Failed to connect to %s (Final Status: %d). Moving to next...\n", saved_ssid, WiFi.status());
+        // Name the failure. wl_status_t on its own sends you hunting through
+        // headers mid-debug, and the two common causes need different fixes:
+        // NO_SSID_AVAIL is "out of range / 5 GHz-only / hidden", while
+        // CONNECT_FAILED and DISCONNECTED after a full timeout are almost always
+        // a wrong password.
+        {
+            const int st = (int)WiFi.status();
+            const char *why =
+                st == WL_NO_SSID_AVAIL  ? "SSID not found (out of range, hidden, or 5 GHz-only — the S3 is 2.4 GHz only)" :
+                st == WL_CONNECT_FAILED ? "auth rejected — wrong password?" :
+                st == WL_DISCONNECTED   ? "no association within the timeout — usually a wrong password" :
+                                          "unknown";
+            Serial.printf("[OTA] FAILED '%s' (status %d: %s)\n", saved_ssid, st, why);
+        }
 
         // Failed to connect to this one — disconnect and try next
         WiFi.disconnect(false);
         delay(100);
     }
 
-    Serial.println("[OTA] Exhausted all saved networks. Connection failed.");
+    Serial.printf("[OTA] Exhausted all %d saved network(s) — still offline. "
+                  "Re-enter the password via the setup portal if the AP is in range.\n", n_try);
 
     if (report) {
         if (!found_any_saved) {
