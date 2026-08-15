@@ -67,16 +67,40 @@ ever scans what is on the screen.
 
 ## Work, in dependency order
 
-1. **Shrink the board portal to provisioning only.** Remove the `/convoy` and
-   `/photos` routes and their tab bars from `PhotoFrameApp.cpp`; `/wifi` becomes
-   the whole page. Add a post-save success state showing the cloud URL + QR.
-   Frees flash rather than costing it.
+1. ~~**Shrink the board portal to provisioning only.**~~ DONE 2026-08-14.
+   `/convoy` and `/convoy/save` are gone, both tab bars are gone, and `/wifi` is
+   the whole portal. Saving a network now redirects to `/wifi?ok=<ssid>`, which
+   renders a handoff card: the cloud URL, a QR for it, and a lead line telling
+   the user to leave the AP first (the link cannot load until they do). The QR
+   is a 37x37 1-bit PNG baked into flash as base64 (`CLOUD_QR_B64`) and drawn at
+   222px with `image-rendering:pixelated` — no encoder on the board, and no
+   round trip to a QR service the phone could not reach anyway. Net flash:
+   **-5,040 bytes** (3,635,663 -> 3,630,623), so it did pay for itself.
+
+   Deviation: `/photos` and `/upload` were KEPT, reachable only from a small
+   footer link on `/wifi`. Deleting the page now would break AP photo upload
+   outright, and step 4 below is what actually replaces it — "stop advertising
+   it" is already true, "delete it" waits for the cloud manifest to land.
 2. **Room/callsign move to the PWA settings drawer**, written to
    `/devices/<id>`, which the board already reads.
-3. **PWA gains a settings drawer + two tabs.** Convoy tab is largely today's
-   `docs/convoy/app.js`; Images tab is new.
-4. **Photos via the cloud manifest** (`ota_sync_photos()` already exists) rather
-   than AP upload. Keep `/upload` as an offline fallback, stop advertising it.
+3. ~~**PWA gains a settings drawer + two tabs.**~~ DONE 2026-08-15 — as a bottom
+   TAB BAR (Convoy | Wi-Fi | Images) rather than a drawer, since two of the three
+   are full screens rather than settings. `#wifi` / `#img` deep-link to a tab.
+   Panels sit at z-index 1100 to clear Leaflet's own controls at 1000.
+4. ~~**Photos via the cloud manifest**~~ DONE 2026-08-15. The Images tab crops to
+   the round 466 px screen on canvas, converts to raw little-endian RGB565 (the
+   board has no image decoder), uploads the `.bin` to Firebase **Storage**, and
+   appends `{path,url}` to `photos/files` — which `ota_sync_photos()` already
+   reads. `/upload` survives unadvertised. **Storage is a separate Firebase
+   product and is not enabled by default**; until it is, the tab reports the
+   rejection instead of failing silently. See `docs/convoy/README.md`.
+
+   Also done: **Wi-Fi from the app**, which the "Open decisions" below argued
+   against. It is implemented with the exposure narrowed rather than removed —
+   the app writes `wssid`/`wpass` into `devices/<id>`, and the board deletes both
+   in the same poll that saves them (`convoy_wifi_pair_tick`), so credentials
+   live in a world-readable node for seconds rather than indefinitely. The tab
+   says so on screen. The board's own hotspot remains the private path.
 5. **Phone-GPS relay becomes an explicit toggle** in the Convoy tab. No firmware
    change needed — the board already prefers its own fix and falls back to
    roster entries (`gps_convoy.h`).
