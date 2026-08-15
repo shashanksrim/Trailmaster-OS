@@ -1250,12 +1250,32 @@ static void pf_load_page_immediately(int page_idx, bool load_neighbors) {
     pf_invalidate_full_screen();
 }
 
+// Opening the frame IS the request for current images — asking the user to
+// press "get" afterwards is a step with no decision behind it.
+//
+// Rate limited because the sync is not free: it joins Wi-Fi, which parks the
+// OBD/BLE worker for its duration. Without a cooldown, flicking in and out of
+// the frame would hold the radio almost continuously. Five minutes is well under
+// how often anyone adds a photo, and the button is still there to force one.
+#define PF_SYNC_COOLDOWN_MS 300000
+static uint32_t pf_next_auto_sync = 0;
+
+static void pf_auto_sync_images(void) {
+    char probe[8][33] = {};
+    if (ota_list_networks(probe, 8) == 0) return;          // nothing to sync over
+    if (pf_next_auto_sync && (int32_t)(millis() - pf_next_auto_sync) < 0) return;
+    pf_next_auto_sync = millis() + PF_SYNC_COOLDOWN_MS;
+    Serial.println("[PF] frame opened; syncing images");
+    ota_sync_photos_async();
+}
+
 void switch_to_photoframe() {
     upload_overlay_open = false;
     pf_upload_overlay = NULL;
     pf_pending_scroll_idx = -1;
     pf_carousel_dirty = false;
     scan_images();
+    pf_auto_sync_images();
     rebuild_pf_pages();
 
     int n = (int)image_files.size();
@@ -1617,8 +1637,11 @@ static void pf_toast_show(const char * text) {
     if (!pf_sync_toast) {
         pf_sync_toast = lv_obj_create(lv_scr_act());
         lv_obj_remove_style_all(pf_sync_toast);
-        lv_obj_set_size(pf_sync_toast, 300, 46);
-        lv_obj_align(pf_sync_toast, LV_ALIGN_TOP_MID, 0, 44);
+        // Bottom, and 264 wide rather than 300: down here the glass narrows
+        // fast — at the toast's lower edge there is only ~298 px of it — so a
+        // wider pill would have its corners cut by the bezel.
+        lv_obj_set_size(pf_sync_toast, 264, 46);
+        lv_obj_align(pf_sync_toast, LV_ALIGN_BOTTOM_MID, 0, -52);
         lv_obj_set_style_bg_color(pf_sync_toast, lv_color_hex(0x101418), 0);
         lv_obj_set_style_bg_opa(pf_sync_toast, 235, 0);
         lv_obj_set_style_radius(pf_sync_toast, 23, 0);
@@ -1627,7 +1650,7 @@ static void pf_toast_show(const char * text) {
         lv_obj_clear_flag(pf_sync_toast, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_t * l = lv_label_create(pf_sync_toast);
         lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(l, 276);
+        lv_obj_set_width(l, 240);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(l, lv_color_hex(0xE8EEF2), 0);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
