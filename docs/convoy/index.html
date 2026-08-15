@@ -108,7 +108,14 @@
     .codein { text-transform:uppercase; letter-spacing:8px; font-size:24px; text-align:center;
       font-weight:700; }
     .tiny { font-size:12px; margin-top:14px; }
-    .sep { border:0; border-top:1px solid var(--line); margin:30px 0 24px; }
+    /* Wi-Fi and Images act on the same board but are separate errands, and
+       stacking them meant scrolling past one to reach the other. */
+    .subtabs { display:flex; gap:6px; background:#141414; border:1px solid var(--line);
+      border-radius:12px; padding:4px; margin:0 0 22px; }
+    .subtab { flex:1; padding:10px 0; border:none; border-radius:9px; background:none;
+      color:var(--muted); font-family:inherit; font-size:14px; font-weight:600;
+      cursor:pointer; }
+    .subtab.active { background:var(--orange); color:#fff; }
     .paired { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted);
       margin:0 0 14px; }
     .paired b { color:var(--text); letter-spacing:2px; }
@@ -348,11 +355,15 @@
       </div>
     </section>
 
-    <section class="panel hidden" id="p-board">
+        <section class="panel hidden" id="p-board">
       <div class="panel-in">
         <div class="paired">Paired with <b id="pair-name">—</b>
           <button class="leave" id="pair-forget">unpair</button></div>
-
+        <div class="subtabs" id="subtabs">
+          <button class="subtab active" data-sub="wifi">Wi-Fi</button>
+          <button class="subtab" data-sub="img">Images</button>
+        </div>
+        <div id="s-wifi">
 <h2>Add Wi-Fi to the board</h2>
         <p class="p-sub">The board picks this up the next time it is on the
           Tracker screen and within its pairing window.</p>
@@ -368,14 +379,12 @@
           The board deletes it the moment it saves it, which keeps that window to
           seconds &mdash; but on a network you care about, prefer the board's own
           setup hotspot.</p>
-
-        <hr class="sep">
-
+        </div>
+        <div id="s-img" class="hidden">
 <h2>Board images</h2>
         <p class="p-sub">Cropped to the round 466&nbsp;px screen and converted
           here — the board stores raw pixels, not JPEGs.</p>
-        <div id="img-board" class="board-note">Checking for your board…</div>
-        <div class="crop-wrap"><canvas id="i-canvas" width="466" height="466"></canvas></div>
+                <div class="crop-wrap"><canvas id="i-canvas" width="466" height="466"></canvas></div>
         <div class="zoom-row hidden" id="i-zoomrow">
           <span>&minus;</span><input type="range" id="i-zoom" min="1" max="3" step="0.01" value="1"><span>+</span>
         </div>
@@ -384,7 +393,8 @@
         <button class="btn btn-orange" id="i-send" disabled>Upload to board</button>
         <div class="err" id="i-err"></div>
         <h3 class="lib-head">On the board</h3>
-        <div id="i-list" class="lib">—</div>
+        <div id="i-list" class="lib">—
+        </div>
       </div>
     </section>
 

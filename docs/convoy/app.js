@@ -129,10 +129,15 @@ function boot() {
   wireWifiTab();
   wireImageTab();
   wirePairing();
+  document.querySelectorAll("#subtabs .subtab")
+          .forEach((b) => b.addEventListener("click", () => showSub(b.dataset.sub)));
   // #wifi / #img open a tab directly, so the QR on the board could point at a
   // specific one later, and so a link in a message lands where it means to.
   const want = location.hash.replace("#", "");
-  if (["board", "wifi", "img"].includes(want)) setTimeout(() => showTab("board"), 0);
+  if (["board", "wifi", "img"].includes(want)) setTimeout(() => {
+    if (want === "wifi" || want === "img") sub = want;
+    showTab("board");
+  }, 0);
 
   if (new URLSearchParams(location.search).has("demo")) { startDemo(); return; }
 
@@ -821,8 +826,24 @@ function showTab(which) {
   if (which === "board" && paired) {
     const b = JSON.parse(localStorage.getItem("cvy_board") || "{}");
     $("pair-name").textContent = b.name || b.dev || "your board";
-    refreshPhotoList();
+    showSub(sub);
   }
+}
+
+// Which half of the board tab is showing. Remembered for the session so
+// switching away and back does not dump you on Wi-Fi when you were mid-upload.
+let sub = "wifi";
+
+function showSub(which) {
+  sub = which;
+  $("s-wifi").classList.toggle("hidden", which !== "wifi");
+  $("s-img").classList.toggle("hidden",  which !== "img");
+  document.querySelectorAll("#subtabs .subtab")
+          .forEach((b) => b.classList.toggle("active", b.dataset.sub === which));
+  // Refresh on entry rather than on a timer: both are a network round trip, and
+  // neither changes while you are looking at the other one.
+  if (which === "wifi") refreshBoardNote();
+  if (which === "img")  refreshPhotoList();
 }
 
 // ── Board lookup, shared by the Wi-Fi and Images tabs ────────────────────────
