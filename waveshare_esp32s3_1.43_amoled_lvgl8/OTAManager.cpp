@@ -693,20 +693,32 @@ void ota_sync_photos() {
     // not the client's buffers.
     String payload;
     {
-        HTTPClient http;
-        WiFiClientSecure client;
-        client.setInsecure();
-        http.begin(client, manifest_url);
-        http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-        int code = http.GET();
-        if (code != 200) {
-            Serial.printf("[OTA] photo manifest -> %d\n", code);
-            set_status(OTA_IDLE, 0, "Could not reach the image store");
-            http.end(); ota_photos_busy = false; return;
+        // Retried, because the first HTTPS request after associating routinely
+        // fails: the link is up before the stack can complete a TLS handshake.
+        // Measured twice on this board — the pairing-code publish hit it, and so
+        // did this fetch, which is what "could not reach the image store"
+        // reported after an otherwise successful auto-sync. A negative code is
+        // HTTPClient's connection error rather than an HTTP status.
+        int code = 0;
+        for (int attempt = 1; attempt <= 3 && payload.isEmpty(); attempt++) {
+            HTTPClient http;
+            WiFiClientSecure client;
+            client.setInsecure();
+            http.begin(client, manifest_url);
+            http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+            code = http.GET();
+            if (code == 200) payload = http.getString();
+            else Serial.printf("[OTA] photo manifest attempt %d -> %d\n", attempt, code);
+            http.end();
+            client.stop();          // free the TLS buffers before the next try
+            if (payload.isEmpty() && attempt < 3) delay(1500);
         }
-        payload = http.getString();
-        http.end();
-        client.stop();
+        if (payload.isEmpty()) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Could not reach the image store (%d)", code);
+            set_status(OTA_IDLE, 0, msg);
+            ota_photos_busy = false; return;
+        }
     }
     Serial.printf("[OTA] internal RAM before downloads: %u\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
