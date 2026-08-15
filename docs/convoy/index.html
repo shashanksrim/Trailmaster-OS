@@ -13,7 +13,10 @@
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <style>
     :root { --orange:#FF6A00; --bg:#0d0d0d; --card:#1a1a1a; --line:#2a2a2a;
-            --text:#f5f5f5; --muted:#888; }
+            --text:#f5f5f5; --muted:#888;
+            /* Tab-bar height. Pinned rather than left to content so the convoy
+               sheet's bottom padding can clear it by construction. */
+            --tabbar:54px; }
     * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     html, body { margin:0; height:100%; }
     body { background:var(--bg); color:var(--text);
@@ -87,6 +90,7 @@
     /* Above Leaflet's own controls, which sit at z-index 1000 and would
        otherwise punch through a panel that covers the map. */
     .tabs { position:absolute; left:0; right:0; bottom:0; z-index:1200; display:flex;
+      min-height:var(--tabbar);
       background:#0d0d0df2; border-top:1px solid var(--line);
       padding-bottom:env(safe-area-inset-bottom); }
     .tab { flex:1; background:none; border:none; color:var(--muted); font-family:inherit;
@@ -119,9 +123,15 @@
       padding:8px; word-break:break-all; font-size:11px; }
     .fab.linked { border-color:#00E5FF; color:#00E5FF; }   /* board connected */
 
-    .sheet { position:absolute; left:0; right:0; bottom:0; z-index:600;
+    /* Anchored ABOVE the tab bar, not padded away from it. The bar is z-1200 and
+       would otherwise cover the last roster row. Bottom padding does not solve
+       it: with a capped max-height and overflow:hidden the rows simply render
+       into the padding, since clipping happens at the border box. Moving the
+       whole sheet up is what actually reserves the space. */
+    .sheet { position:absolute; left:0; right:0; z-index:600;
+      bottom:calc(var(--tabbar) + env(safe-area-inset-bottom));
       background:#141414f2; border-top:1px solid var(--line);
-      border-radius:18px 18px 0 0; padding:0 14px calc(env(safe-area-inset-bottom) + 14px);
+      border-radius:18px 18px 0 0; padding:0 14px 14px;
       max-height:26dvh; overflow:hidden; backdrop-filter:blur(6px); transition:max-height .25s ease; }
     .sheet.expanded { max-height:74dvh; overflow:auto; }
     .grab { width:40px; height:5px; border-radius:3px; background:#ffffff33; margin:9px auto 2px; }
