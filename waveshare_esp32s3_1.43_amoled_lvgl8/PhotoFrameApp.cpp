@@ -353,12 +353,22 @@ static void pf_build_upload_gateway_page(lv_obj_t * parent) {
     lv_obj_set_style_bg_color(btn, lv_color_hex(0x606060), 0); // Steel grey button
     lv_obj_set_style_radius(btn, 32, 0);
     lv_obj_t * lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, "Upload images");
+    lv_label_set_text(lbl, "Get images");
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_22, 0);
     lv_obj_center(lbl);
     lv_obj_add_event_cb(btn, [](lv_event_t * e) {
         if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-        pf_show_upload_overlay(false);   // photo upload gateway: keeps the toggle
+        // Images come FROM the app now, so this is a pull, not an upload
+        // gateway. Sending someone to the board's hotspot would be worse than
+        // the old flow: on that network the phone cannot reach the app it would
+        // need to pick a photo from.
+        //
+        // With no network saved there is nothing to pull over, so fall back to
+        // provisioning — which is what the QR screen offers in that state anyway.
+        char probe[8][33] = {};
+        if (ota_list_networks(probe, 8) == 0) { pf_show_upload_overlay(true); return; }
+        ota_sync_photos_async();
+        pf_show_upload_overlay(false);
     }, LV_EVENT_CLICKED, NULL);
 }
 
@@ -698,7 +708,7 @@ void pf_show_upload_overlay(bool wifi_only) {
     // that behaved differently on every phone tried. A QR on the device has
     // none of that in the path.
     char cfg_ssids[8][33] = {};
-    bool provisioned = wifi_only && (ota_list_networks(cfg_ssids, 8) > 0);
+    bool provisioned = (ota_list_networks(cfg_ssids, 8) > 0);
 
     // Drawn at NATIVE SIZE. The asset is 222x222 with a 4-module white quiet
     // zone baked in, which is what makes it scannable — the previous 200x200
@@ -717,11 +727,21 @@ void pf_show_upload_overlay(bool wifi_only) {
     lv_obj_t * qr_img = lv_img_create(pf_upload_overlay);
     lv_img_set_src(qr_img, provisioned ? &app_qrcode : &wifi_qrcode);
     lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, provisioned ? 6 : (wifi_only ? -6 : -10));
+    // The photo screen is drawn on black; the app QR asset is dark-on-white and
+    // needs its own white ground to stay scannable.
+    if (provisioned && !wifi_only) {
+        lv_obj_set_style_bg_color(pf_upload_overlay, lv_color_hex(0xFFFFFF), 0);
+    }
 
-    if (wifi_only && !provisioned) {
-    // No toggle here: opening Wi-Fi setup IS the request to turn the hotspot on,
-    // so asking again is a step with no decision behind it — and the row it
-    // occupied is what lets the QR be comfortably scannable.
+    if (!provisioned) {
+    // The hotspot starts by itself, with no toggle to confirm it: reaching this
+    // screen with no network saved IS the request to turn it on, so asking again
+    // would be a step with no decision behind it. The row that toggle used to
+    // occupy is what lets the QR be comfortably scannable.
+    //
+    // The toggle that lived on the photo path is gone with the AP upload it
+    // served — photos arrive from the app now, and offering the hotspot there
+    // would strand the phone on a network that cannot reach the app at all.
     //
     // Safe in THIS context specifically. The garble the toggle guards against is
     // a dropped full-frame flush, and that full redraw comes from
@@ -735,62 +755,13 @@ void pf_show_upload_overlay(bool wifi_only) {
         lv_timer_del(tm);
     }, 400, NULL);
     (void)ap_start;
-    } else if (provisioned) {
-    // No AP at all on this branch. There is nothing to configure, and leaving
-    // the hotspot up is what used to strand the phone on a network with no
-    // internet — exactly what the app QR is here to avoid.
-    pf_autostart_wifi = false;
     } else {
-    // Wi-Fi Toggle Switch — wrapped in a flex row so the label+switch pair is
-    // centered as a unit (previously the switch was hardcoded at center+50,
-    // with the label hung off its left edge, so the whole row sat off-center
-    // by however wide the label happened to render). Switch size matches the
-    // Settings screen's toggles (60x30) for consistency.
-    //
-    // KEPT for the photo-upload path. Closing over the photo screen DOES trigger
-    // the full-frame redraw that used to be dropped, so the trade that motivated
-    // this toggle still applies here. When Firebase photo sync retires AP
-    // uploads, this branch and the small QR variant go with it.
-    lv_obj_t * wifi_row = lv_obj_create(pf_upload_overlay);
-    lv_obj_set_size(wifi_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(wifi_row, 0, 0);
-    lv_obj_set_style_border_width(wifi_row, 0, 0);
-    lv_obj_set_style_pad_all(wifi_row, 0, 0);
-    lv_obj_clear_flag(wifi_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(wifi_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(wifi_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(wifi_row, 10, 0);
-    lv_obj_align(wifi_row, LV_ALIGN_CENTER, 0, 130);
-
-    lv_obj_t * wifi_lbl = lv_label_create(wifi_row);
-    lv_label_set_text(wifi_lbl, "Enable Wi-Fi:");
-    lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(wifi_lbl, lv_color_hex(0xFFFFFF), 0);
-
-    lv_obj_t * wifi_sw = lv_switch_create(wifi_row);
-    lv_obj_set_size(wifi_sw, 60, 30);
-    lv_obj_set_style_bg_color(wifi_sw, lv_color_hex(0xFF6A00), LV_PART_INDICATOR | LV_STATE_CHECKED);
-    lv_obj_add_event_cb(wifi_sw, [](lv_event_t * ev) {
-        lv_obj_t * sw = lv_event_get_target(ev);
-        if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
-            start_photoframe_wifi();
-        } else {
-            stop_photoframe_wifi();
-        }
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-
-    // First-run onboarding: open with the hotspot already ON.
-    if (pf_autostart_wifi) {
-        pf_autostart_wifi = false;
-        lv_obj_add_state(wifi_sw, LV_STATE_CHECKED);
-        // Defer the AP start briefly so it doesn't collide with LVGL rendering.
-        lv_timer_t * t = lv_timer_create([](lv_timer_t * tm) {
-            start_photoframe_wifi();
-            lv_timer_del(tm);
-        }, 400, NULL);
-        (void)t;
+    // Provisioned: no AP on either path. There is nothing to configure, and
+    // nothing to upload over it — photos arrive from the app through the cloud.
+    // Leaving the hotspot up is what used to strand the phone on a network with
+    // no internet, which is exactly what the app QR avoids.
+    pf_autostart_wifi = false;
     }
-    }   // end !wifi_only
 
     // Caption. The unprovisioned case spells out the steps, because scanning a
     // Wi-Fi QR only gets the phone onto the AP — the setup page is a separate
@@ -1631,6 +1602,15 @@ void stop_photoframe_wifi() {
 }
 
 void photoframe_loop_handler() {
+    // A cloud sync lands files on the SD card from another task, so the frame
+    // has to be told to look again. Routed through the same flag the AP upload
+    // path sets, so both arrivals rebuild the carousel identically.
+    if (ota_photos_changed) {
+        ota_photos_changed = false;
+        new_image_uploaded = true;
+        Serial.println("[PF] photo sync finished; rescanning");
+    }
+
     if (new_image_uploaded) {
         new_image_uploaded = false;
         if (upload_overlay_open) {

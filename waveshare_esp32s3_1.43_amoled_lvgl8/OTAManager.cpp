@@ -665,6 +665,30 @@ void ota_sync_photos() {
     set_status(OTA_IDLE, 0, "Photos up to date");
 }
 
+// Run the photo sync off the UI thread. It makes HTTPS requests and writes
+// several hundred KB to the SD card per image, so calling it inline would freeze
+// LVGL for seconds — and it is triggered from a screen the user is looking at.
+//
+// Its own task rather than ota_task's: that one owns the firmware update state
+// machine and announces itself through the OTA overlay, which would make a photo
+// sync look like a pending firmware update.
+static TaskHandle_t s_photo_task = NULL;
+volatile bool ota_photos_changed = false;   // set when new files landed; UI clears it
+
+static void ota_photo_task(void *) {
+    const int before = 0;
+    (void)before;
+    ota_sync_photos();
+    ota_photos_changed = true;              // the frame rescans and rebuilds
+    s_photo_task = NULL;
+    vTaskDelete(NULL);
+}
+
+void ota_sync_photos_async() {
+    if (s_photo_task) return;               // already running
+    xTaskCreatePinnedToCore(ota_photo_task, "photo_sync", 8192, NULL, 1, &s_photo_task, 0);
+}
+
 // ── Background Task ───────────────────────────────────────────────────────────
 static void ota_task(void* param) {
     bool do_install = (param != NULL);

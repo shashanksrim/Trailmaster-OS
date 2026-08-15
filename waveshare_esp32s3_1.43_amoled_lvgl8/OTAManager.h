@@ -47,6 +47,12 @@ bool ota_wifi_connect_saved();
 // network — normally home Wi-Fi, so photos are not round-tripped through the
 // phone's cellular twice. Files already on the card are skipped.
 void ota_sync_photos();
+// Same, on its own task. Use this from anything the user is looking at — the
+// synchronous form blocks for seconds per image.
+void ota_sync_photos_async();
+// Set true when a sync actually brought files down; the photo frame clears it
+// after rescanning. Not a count: the frame only needs "something changed".
+extern volatile bool ota_photos_changed;
 
 // Starts check+install flow on a background FreeRTOS task.
 // If an update is found, state becomes OTA_UPDATE_AVAILABLE.
