@@ -90,7 +90,15 @@ static lv_obj_t * settings_screen = NULL;
 static int brightness_level = 8; // 1-10, default 8 (~200/255)
 int use_grid_launcher = 1; // 1 = grid, 0 = list
 int use_jimny_logo = 0; // 1 = jimny logo, 0 = custom/trailmaster (Default OFF as requested)
-bool tracker_enabled = true; // Settings toggle: show the Convoy Tracker launcher tile
+// OFF by default. Convoy is opt-in kit — it needs a T-Beam or a convoy room to
+// be worth anything, and the Tracker owns the radio while it is open, which
+// stands the OBD telemetry link down. A board that has never been told to use it
+// should not carry the tile.
+bool tracker_enabled = false;   // Settings: show the Convoy Tracker launcher tile
+// Mesh (Meshtastic over BLE) as a separate switch: the two sources are mutually
+// exclusive on this build, and a user with no T-Beam should not be offered a
+// scan that can only fail.
+bool mesh_enabled = false;
 // Tracker "radio mode": while the Tracker is open it OWNS the radio — WiFi is
 // powered down (frees internal RAM/DMA) and BLE runs instead. WiFi+BLE+the AMOLED
 // don't fit in internal RAM together (BLE corrupts the display). The OBD worker
@@ -533,7 +541,11 @@ void build_settings_screen() {
         Serial.printf("[SETTINGS] Grid Launcher set to %d\n", use_grid_launcher);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // ─── ROW 1.8: Convoy Tracker Toggle ──────────────────────────────────────
+    // ─── ROW 1.8: Convoy Tracker ─────────────────────────────────────────────
+    // A row that opens its own sheet rather than a bare switch, matching
+    // "Companion app & wifi" next to it. There is more than one decision behind
+    // convoy now — whether it appears at all, and whether the mesh source is
+    // offered — and the callsign that identifies this car belongs beside them.
     lv_obj_t * row_trk = lv_obj_create(scr_rows);
     lv_obj_set_size(row_trk, 430, 80);
     lv_obj_set_style_bg_color(row_trk, lv_color_hex(0x1A1A1A), 0);
@@ -542,6 +554,7 @@ void build_settings_screen() {
     lv_obj_set_style_border_color(row_trk, lv_color_hex(0x333333), 0);
     lv_obj_set_style_radius(row_trk, 12, 0);
     lv_obj_clear_flag(row_trk, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row_trk, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t * lbl_trk = lv_label_create(row_trk);
     lv_label_set_text(lbl_trk, "Convoy Tracker");
@@ -549,24 +562,15 @@ void build_settings_screen() {
     lv_obj_set_style_text_color(lbl_trk, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_trk, LV_ALIGN_LEFT_MID, 14, 0);
 
-    lv_obj_t * sw_trk = lv_switch_create(row_trk);
-    lv_obj_align(sw_trk, LV_ALIGN_RIGHT_MID, -20, 0);
-    lv_obj_set_size(sw_trk, 60, 30);
-    lv_obj_set_style_bg_color(sw_trk, lv_color_hex(0xFF6A00), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_t * arrow_trk = lv_label_create(row_trk);
+    lv_label_set_text(arrow_trk, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow_trk, lv_color_hex(0x888888), 0);
+    lv_obj_align(arrow_trk, LV_ALIGN_RIGHT_MID, -18, 0);
 
-    if (tracker_enabled) lv_obj_add_state(sw_trk, LV_STATE_CHECKED);
-    else lv_obj_clear_state(sw_trk, LV_STATE_CHECKED);
-
-    lv_obj_add_event_cb(sw_trk, [](lv_event_t * e) {
-        if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
-        lv_obj_t * obj = lv_event_get_target(e);
-        tracker_enabled = lv_obj_has_state(obj, LV_STATE_CHECKED);
-        Preferences p;
-        p.begin("hellojimny", false);
-        p.putInt("tracker_en", tracker_enabled ? 1 : 0);
-        p.end();
-        Serial.printf("[SETTINGS] Convoy Tracker set to %d\n", tracker_enabled);
-    }, LV_EVENT_VALUE_CHANGED, NULL);
+    extern void pf_show_convoy_menu(void);
+    lv_obj_add_event_cb(row_trk, [](lv_event_t * e) {
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_convoy_menu();
+    }, LV_EVENT_ALL, NULL);
 
     make_settings_section_header(scr_rows, "BOOT IMAGE");
 
@@ -1568,7 +1572,8 @@ void setup() {
         p.begin("hellojimny", false);
         use_jimny_logo = p.getInt("jimny_logo", 0); // Default to 0 (Trailmaster)
         use_grid_launcher = p.getInt("grid_launcher", 1); // Default to 1 (Grid launcher on)
-        tracker_enabled = p.getInt("tracker_en", 1) ? true : false; // Default ON
+        tracker_enabled = p.getInt("tracker_en", 0) ? true : false;   // default OFF
+        mesh_enabled    = p.getInt("mesh_en",    0) ? true : false;   // default OFF
         // Same namespace, and read here rather than left to load_speedo_preferences()
         // finding a caller: "Set as default" saved to NVS correctly, but NOTHING
         // ever read it back, so default_speedometer kept its initialiser 0 every

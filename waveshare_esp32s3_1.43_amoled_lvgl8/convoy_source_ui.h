@@ -3,7 +3,7 @@
 // Shared UI (firmware + sim, single translation unit), same pattern as
 // convoy_ui.h. Two pages, each with an X close on top (matching the app's other
 // contextual screens):
-//   Page 1 (source):  MESHTASTIC  |  USE PHONE     X → back to the radar
+//   Page 1 (source):  MESHTASTIC  |  WIFI          X → back to the radar
 //   Page 2 (scan):    list of T-Beams by name+RSSI  X → back to page 1
 //
 // Rendering is data-source-agnostic: firmware feeds real scan results, the sim
@@ -11,7 +11,7 @@
 // convoy_src_on_* callbacks the caller wires to real behaviour.
 //   MESHTASTIC → opens page 2 + convoy_src_on_scan()
 //   a T-Beam   → convoy_src_on_pick_device(index)
-//   USE PHONE  → convoy_src_on_use_phone()   (radar shows "Connect via browser")
+//   WIFI       → convoy_src_on_cloud()       (board reads the room itself)
 //   X (page 1) → convoy_src_on_back()
 #ifndef CONVOY_SOURCE_UI_H
 #define CONVOY_SOURCE_UI_H
@@ -146,14 +146,27 @@ static lv_obj_t *convoy_src_build_screen(void) {
 
     // Page 1 — source select
     convoy_src_screen = cvsrc_page("CONVOY SOURCE");
-    // Three sources now. 82px pitch keeps a 16px gap between the 66px cards and
-    // still clears the round screen's edges at the top and bottom rows.
-    lv_obj_t *m = cvsrc_card(convoy_src_screen, "MESHTASTIC", "Scan for T-Beam", CVSRC_CYAN, cvsrc_mesh_evt);
-    lv_obj_align(m, LV_ALIGN_CENTER, 0, -82);
-    lv_obj_t *c = cvsrc_card(convoy_src_screen, "CONVOY", "Over phone hotspot", CVSRC_GREEN, cvsrc_cloud_evt);
-    lv_obj_align(c, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_t *p = cvsrc_card(convoy_src_screen, "USE PHONE", "Relay over Bluetooth", CV_ORANGE, cvsrc_phone_evt);
-    lv_obj_align(p, LV_ALIGN_CENTER, 0, 82);
+    // Two sources. USE PHONE relayed the roster over Bluetooth from a browser,
+    // which only ever worked on Android — iOS has no Web Bluetooth — and it is
+    // strictly worse than WIFI now that the board reads the room itself: the
+    // phone had to stay awake with the page open, and the board could not use
+    // Wi-Fi at the same time. Keeping it offered a choice whose right answer
+    // was always the other one.
+    //
+    // 44px pitch centres the pair; the old 82px spacing was for three rows.
+    // MESHTASTIC only when it is switched on in Convoy Tracker settings. Without
+    // a T-Beam it is a scan that can only fail, and offering it makes the wrong
+    // answer look like a choice.
+    extern bool mesh_enabled;
+    if (mesh_enabled) {
+        lv_obj_t *m = cvsrc_card(convoy_src_screen, "MESHTASTIC", "Scan for T-Beam", CVSRC_CYAN, cvsrc_mesh_evt);
+        lv_obj_align(m, LV_ALIGN_CENTER, 0, -44);
+        lv_obj_t *c = cvsrc_card(convoy_src_screen, "WIFI", "Over phone hotspot", CVSRC_GREEN, cvsrc_cloud_evt);
+        lv_obj_align(c, LV_ALIGN_CENTER, 0, 44);
+    } else {
+        lv_obj_t *c = cvsrc_card(convoy_src_screen, "WIFI", "Over phone hotspot", CVSRC_GREEN, cvsrc_cloud_evt);
+        lv_obj_align(c, LV_ALIGN_CENTER, 0, 0);
+    }
     cvsrc_close_btn(convoy_src_screen, cvsrc_back_evt);
 
     // Page 2 — device scan

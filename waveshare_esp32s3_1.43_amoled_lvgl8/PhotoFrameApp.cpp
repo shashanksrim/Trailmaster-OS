@@ -12,6 +12,8 @@
 #include <AnimatedGIF.h>
 #include "OTAManager.h"
 #include "pair_code.h"   // the six characters a phone types to pair with THIS board
+#include "convoy_cfg.h"   // this car's callsign, shown on the convoy sheet
+#include <Preferences.h>
 
 extern Amoled amoled;
 
@@ -652,6 +654,84 @@ void pf_show_wifi_menu(void) {
     lv_obj_add_event_cb(r1, pf_open_networks, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(r2, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(r2, pf_open_wifi_qr, LV_EVENT_CLICKED, NULL);
+}
+
+
+// ── Convoy tracker settings ──────────────────────────────────────────────────
+// Lives in this file because the sheet furniture does — pf_wifi_sheet and the
+// row styles are static here, and duplicating them for one more screen would be
+// worse than the odd home. Same shape as the companion sheet deliberately: the
+// identity that matters is on top, the switches under it.
+extern bool tracker_enabled;
+extern bool mesh_enabled;
+
+static void pf_convoy_pref(const char *key, bool on) {
+    Preferences p;
+    p.begin("hellojimny", false);
+    p.putInt(key, on ? 1 : 0);
+    p.end();
+    Serial.printf("[SETTINGS] %s set to %d\n", key, on ? 1 : 0);
+}
+
+static lv_obj_t *pf_switch_row(lv_obj_t *box, const char *title, const char *sub,
+                               bool on, lv_event_cb_t cb) {
+    lv_obj_t *row = pf_wifi_row(box, title, sub);
+    lv_obj_t *sw  = lv_switch_create(row);
+    lv_obj_set_size(sw, 60, 30);
+    lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -14, 0);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0xFF6A00), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    if (on) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    return row;
+}
+
+void pf_show_convoy_menu(void) {
+    if (pf_wifi_menu) return;
+    lv_obj_t *ov = pf_wifi_sheet("CONVOY TRACKER");
+    pf_wifi_menu = ov;
+
+    lv_obj_t *box = lv_obj_create(ov);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, 376, 272);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 124);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 8, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Callsign first, read like a heading — the same treatment the pairing code
+    // gets next door, and for the same reason: it is what identifies this car to
+    // everyone else, and it is set elsewhere (the app) rather than here.
+    static char call[CONVOY_CFG_CALL_MAX];
+    convoy_cfg_get_callsign(call, sizeof(call));
+    lv_obj_t *cs_row = lv_obj_create(box);
+    lv_obj_remove_style_all(cs_row);
+    lv_obj_set_size(cs_row, 356, 72);
+    lv_obj_clear_flag(cs_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *cs = lv_label_create(cs_row);
+    lv_label_set_text(cs, call[0] ? call : "not set");
+    lv_obj_set_style_text_font(cs, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(cs, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_letter_space(cs, 4, 0);
+    lv_obj_align(cs, LV_ALIGN_TOP_MID, 0, 4);
+
+    lv_obj_t *cs_sub = lv_label_create(cs_row);
+    lv_label_set_text(cs_sub, "This car's callsign — set it in the app");
+    lv_obj_set_style_text_font(cs_sub, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(cs_sub, lv_color_hex(0x888888), 0);
+    lv_obj_align(cs_sub, LV_ALIGN_TOP_MID, 0, 40);
+
+    pf_switch_row(box, "Convoy tracker", "Show it in the launcher", tracker_enabled,
+                  [](lv_event_t *e) {
+                      tracker_enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+                      pf_convoy_pref("tracker_en", tracker_enabled);
+                  });
+
+    pf_switch_row(box, "Meshtastic", "Off-grid, needs a T-Beam", mesh_enabled,
+                  [](lv_event_t *e) {
+                      mesh_enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+                      pf_convoy_pref("mesh_en", mesh_enabled);
+                  });
 }
 
 void pf_show_upload_overlay(bool wifi_only) {

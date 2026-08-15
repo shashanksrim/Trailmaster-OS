@@ -814,6 +814,7 @@ function showTab(which) {
   // specific board, so it stays locked until this phone has been told which —
   // showing the controls first and failing later just hides that difference.
   const paired = !!myBoard();
+  if (which !== "board") stopBoardWatch();
   $("p-lock").classList.toggle("hidden",  which !== "board" || paired);
   $("p-board").classList.toggle("hidden", which !== "board" || !paired);
   // Convoy's own furniture would otherwise float above a panel.
@@ -827,6 +828,13 @@ function showTab(which) {
     const b = JSON.parse(localStorage.getItem("cvy_board") || "{}");
     $("pair-name").textContent = b.name || b.dev || "your board";
     showSub(sub);
+    // Prefill from the board's own node rather than from this phone: they can
+    // differ, and the board's value is the one that decides the radar.
+    if (db && b.dev) {
+      get(ref(db, `devices/${b.dev}/callsign`))
+        .then((snap) => { if (snap.val()) $("b-call").value = snap.val(); })
+        .catch(() => {});
+    }
   }
 }
 
@@ -842,9 +850,31 @@ function showSub(which) {
           .forEach((b) => b.classList.toggle("active", b.dataset.sub === which));
   // Refresh on entry rather than on a timer: both are a network round trip, and
   // neither changes while you are looking at the other one.
-  if (which === "wifi") refreshBoardNote();
+  if (which === "wifi") startBoardWatch(); else stopBoardWatch();
   if (which === "img")  refreshPhotoList();
 }
+
+// The board only listens for a few minutes after the Tracker is opened, and the
+// usual sequence is to read this line, walk to the car, and open it — so a
+// status checked once on entry is stale exactly when it is being acted on.
+// Polls only while this half is visible; images need none of this, since they
+// are collected by the board rather than pushed to it.
+let boardWatch = null;
+function startBoardWatch() {
+  refreshBoardNote();
+  if (boardWatch) return;
+  boardWatch = setInterval(refreshBoardNote, 5000);
+}
+function stopBoardWatch() {
+  if (!boardWatch) return;
+  clearInterval(boardWatch);
+  boardWatch = null;
+}
+// A backgrounded tab should not keep polling Firebase from a pocket.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopBoardWatch();
+  else if (tab === "board" && sub === "wifi" && myBoard()) startBoardWatch();
+});
 
 // ── Board lookup, shared by the Wi-Fi and Images tabs ────────────────────────
 // Both write into the board's own node, so both need to know which board is
@@ -883,6 +913,25 @@ const myPairCode = () => {
 function wirePairing() {
   const go = $("pair-go"), inp = $("pair-code"), errEl = $("pair-err");
   if (!go) return;
+
+  // Setting the board's callsign had no home after the on-device portal was
+  // deleted — it could only be changed as a side effect of tapping Connect,
+  // which writes whatever this phone's callsign happens to be. It belongs here,
+  // where the board is already identified.
+  $("b-call-save").addEventListener("click", async () => {
+    const hint = $("b-call-hint");
+    const cs = ($("b-call").value || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, CALLSIGN_MAX);
+    const dev = myBoard();
+    if (!cs)  { hint.textContent = "Enter a callsign."; return; }
+    if (!dev) { hint.textContent = "Pair with your board first."; return; }
+    hint.textContent = "Saving…";
+    try {
+      await update(ref(db, `devices/${dev}`), { callsign: cs });
+      hint.textContent = `Saved. The board picks "${cs}" up next time it is online.`;
+    } catch (e) {
+      hint.textContent = "Could not save: " + (e.message || e);
+    }
+  });
 
   $("pair-forget").addEventListener("click", () => {
     localStorage.removeItem("cvy_board");

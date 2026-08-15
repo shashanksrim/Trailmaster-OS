@@ -110,6 +110,12 @@
     .tiny { font-size:12px; margin-top:14px; }
     /* Wi-Fi and Images act on the same board but are separate errands, and
        stacking them meant scrolling past one to reach the other. */
+    .callsign-row { margin:0 0 20px; }
+    .callsign-row label { margin-top:0; }
+    .cs-in { display:flex; gap:8px; align-items:center; }
+    .cs-in input { text-transform:uppercase; letter-spacing:2px; font-weight:700; }
+    .cs-in button { white-space:nowrap; padding:12px 16px; }
+    .cs-hint { color:var(--muted); font-size:12px; line-height:1.5; margin:8px 0 0; }
     .subtabs { display:flex; gap:6px; background:#141414; border:1px solid var(--line);
       border-radius:12px; padding:4px; margin:0 0 22px; }
     .subtab { flex:1; padding:10px 0; border:none; border-radius:9px; background:none;
@@ -360,12 +366,23 @@
         <div class="paired">Paired with <b id="pair-name">—</b>
           <button class="leave" id="pair-forget">unpair</button></div>
         <div class="subtabs" id="subtabs">
-          <button class="subtab active" data-sub="wifi">Wi-Fi</button>
+          <button class="subtab active" data-sub="wifi">Settings</button>
           <button class="subtab" data-sub="img">Images</button>
         </div>
         <div id="s-wifi">
-<h2>Add Wi-Fi to the board</h2>
-        <p class="p-sub">The board picks this up the next time it is on the
+        <div class="callsign-row">
+          <label for="b-call">This car's callsign</label>
+          <div class="cs-in">
+            <input id="b-call" maxlength="7" autocapitalize="characters" autocorrect="off"
+                   spellcheck="false" placeholder="TM1">
+            <button class="leave" id="b-call-save">Save</button>
+          </div>
+          <p class="cs-hint" id="b-call-hint">Which car this board is on the radar. It has to match
+            your own callsign in the convoy — that entry is what puts this car on the map.</p>
+        </div>
+
+          <h2>Add Wi-Fi to the board</h2>
+<p class="p-sub">The board picks this up the next time it is on the
           Tracker screen and within its pairing window.</p>
         <div id="wifi-board" class="board-note">Checking for your board…</div>
         <label for="w-ssid">Network name (SSID)</label>

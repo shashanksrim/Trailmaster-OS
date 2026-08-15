@@ -47,6 +47,7 @@ void set_custom_boot_time(int val);
 #ifdef __cplusplus
 extern "C" {
 void pf_show_wifi_menu(void);   // Wi-Fi settings: saved networks | configure
+void pf_show_convoy_menu(void); // Convoy: callsign, tracker on/off, mesh on/off
 
 #endif
 void switch_to_launcher();
@@ -62,5 +63,6 @@ void force_full_ui_redraw(lv_obj_t * target_scr);
 
 // C++ linkage on purpose: only the .ino (C++) calls it.
 void pf_show_wifi_menu(void);   // Wi-Fi settings: saved networks | configure
+void pf_show_convoy_menu(void); // Convoy: callsign, tracker on/off, mesh on/off
 
 #endif // PHOTO_FRAME_APP_H

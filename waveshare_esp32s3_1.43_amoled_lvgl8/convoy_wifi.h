@@ -266,6 +266,20 @@ static void convoy_wifi_publish(void) {
 }
 
 
+// Publish identity back. Called only AFTER reconciliation, because announcing
+// first writes a PRE-reconciliation callsign over the one just read — and the
+// next tick then reads the board's own stale write, sees it differ from the last
+// cloud value, and treats it as a fresh assignment from the app. That is a
+// ping-pong, not a race: observed alternating between "Kaiju j" and "TM1" every
+// couple of seconds, with each side convinced the other had just changed it.
+static void cvw_announce_identity(void) {
+    char body[200];
+    snprintf(body, sizeof(body),
+             "{\"name\":\"%s\",\"callsign\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
+             s_cvw_dev_name, s_cvw_call[0] ? s_cvw_call : "TM");
+    if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
+}
+
 // Publish the code -> device mapping the app resolves when someone types the six
 // characters shown on this board's settings screen.
 //
@@ -311,16 +325,6 @@ static void convoy_wifi_pair_tick(void) {
     char room[CONVOY_CFG_ROOM_MAX] = {}, call[CONVOY_CFG_CALL_MAX] = {};
     json_get_str(node.c_str(), "room",     room, sizeof(room));
     json_get_str(node.c_str(), "callsign", call, sizeof(call));
-    // Publish our identity back, including the callsign that survived the
-    // reconciliation below. Done unconditionally (even before a room exists) so
-    // the board still appears in the app's list for pairing.
-    {
-        char body[200];
-        snprintf(body, sizeof(body),
-                 "{\"name\":\"%s\",\"callsign\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
-                 s_cvw_dev_name, s_cvw_call[0] ? s_cvw_call : "TM");
-        if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
-    }
 
     // Wi-Fi handed down from the app's Wi-Fi tab. Consumed and DELETED in the
     // same tick: this node is world-readable, so a credential left sitting in it
@@ -335,12 +339,17 @@ static void convoy_wifi_pair_tick(void) {
         json_get_str(node.c_str(), "wpass", w_pass, sizeof(w_pass));
         if (w_ssid[0]) {
             ota_add_network(w_ssid, w_pass);
-            cvw_request(s_cvw_pair_url, "PATCH", "{\"wssid\":null,\"wpass\":null}", nullptr);
+            // `k` goes with them. devices/<id> is world-readable and RTDB read
+            // permission cascades down, so a pairing code left in that node can
+            // be read by anyone listing devices — which would undo the whole
+            // point of the code being visible only on the board's own screen.
+            cvw_request(s_cvw_pair_url, "PATCH",
+                        "{\"wssid\":null,\"wpass\":null,\"k\":null}", nullptr);
             Serial.printf("[CVW] wifi '%s' saved from the app; node cleared\n", w_ssid);
         }
     }
 
-    if (!room[0]) return;                       // not linked yet
+    if (!room[0]) { cvw_announce_identity(); return; }   // listable before linking
 
     char norm[CONVOY_CFG_ROOM_MAX];
     convoy_normalize_code(room, norm, sizeof(norm));
@@ -363,7 +372,10 @@ static void convoy_wifi_pair_tick(void) {
     if (call[0]) { strncpy(s_cvw_cloud_call, call, sizeof(s_cvw_cloud_call) - 1);
                    s_cvw_cloud_call[sizeof(s_cvw_cloud_call) - 1] = '\0'; }
 
-    if (strcmp(norm, s_cvw_room) == 0 && !app_changed_call) return;   // nothing new
+    if (strcmp(norm, s_cvw_room) == 0 && !app_changed_call) {
+        cvw_announce_identity();                // refresh ts so we stay listed
+        return;
+    }
 
     // Adopt it, and remember it so the next drive needs no linking at all.
     strncpy(s_cvw_room, norm, sizeof(s_cvw_room) - 1); s_cvw_room[sizeof(s_cvw_room) - 1] = '\0';
@@ -375,6 +387,7 @@ static void convoy_wifi_pair_tick(void) {
         s_cvw_call[CONVOY_CFG_CALL_LEN] = '\0';
     }
     convoy_cfg_set(s_cvw_room, s_cvw_call);
+    cvw_announce_identity();                    // now it is the reconciled value
     cvw_build_room_urls();
     s_cvw_last_rx = 0;
     Serial.printf("[CVW] linked: room=%s self=%s (%s)\n", s_cvw_room, s_cvw_call,
