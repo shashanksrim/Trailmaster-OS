@@ -12,12 +12,14 @@
 
 extern lv_obj_t * grid_container;
 extern bool ignore_until_lift;
+extern bool tracker_enabled;   // Settings toggle: show the Tracker tile or not
 
 extern "C" {
     void build_rom_menu();
     void build_settings_screen();
     void build_about_screen();
     void app_imageframe(lv_event_t * e);
+    void convoy_open_screen();   // convoy/tracker radar (firmware + sim define it)
 }
 
 inline void btn_event_cb(lv_event_t * e) {
@@ -45,11 +47,14 @@ inline void btn_event_cb(lv_event_t * e) {
         case 4: // GAMES
             build_rom_menu();
             break;
-        case 5: // SYSTEM
-            build_settings_screen();
+        case 5: // TRACKER (convoy radar) — moved up into Settings' old slot
+            convoy_open_screen();
             break;
         case 6: // ABOUT
             build_about_screen();
+            break;
+        case 7: // SYSTEM (settings) — moved down into Tracker's old slot
+            build_settings_screen();
             break;
     }
 }
@@ -84,25 +89,29 @@ inline void build_grid_launcher() {
     // Keep scrolling functionality active but make the scrollbar fully invisible
     lv_obj_set_scrollbar_mode(grid_container, LV_SCROLLBAR_MODE_OFF);
 
-    // 7 items following the exact original list sequence: Speed, Gauges, Incline, Image, Games, Settings, About
-    const lv_img_dsc_t* imgs[] = {&icon_speedo, &icon_gauges, &icon_incline, &icon_image, &icon_games, &icon_settings, &icon_about};
-    const char* labels[] = {"SPEEDO", "GAUGES", "INCLINE", "IMAGE", "GAMES", "SYSTEM", "ABOUT"};
+    // 8 items: Speed, Gauges, Incline, Image, Games, Tracker, About, Settings.
+    // Tracker (index 5) draws a procedural radar glyph instead of a bitmap and
+    // is only shown when tracker_enabled (Settings toggle).
+    const lv_img_dsc_t* imgs[] = {&icon_speedo, &icon_gauges, &icon_incline, &icon_image, &icon_games, &icon_gps, &icon_about, &icon_settings};
+    const char* labels[] = {"SPEEDO", "GAUGES", "INCLINE", "IMAGE", "GAMES", "TRACKER", "ABOUT", "SYSTEM"};
     const lv_color_t colors[] = {
         lv_color_hex(0xFF0000), // Speedo (Red)
         lv_color_hex(0x4ade80), // Gauges (Green)
         lv_color_hex(0xFF0000), // Incline (Red)
         lv_color_hex(0xa78bfa), // Image (Purple)
         lv_color_hex(0xf87171), // Games (Red)
-        lv_color_hex(0x5a7060), // System (Gray-green)
-        lv_color_hex(0x38bdf8)  // About (Blue)
+        lv_color_hex(0xFF6A00), // Tracker (Trailmaster orange)
+        lv_color_hex(0x38bdf8), // About (Blue)
+        lv_color_hex(0x5a7060)  // System (Gray-green)
     };
 
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
+        if (i == 5 && !tracker_enabled) continue;   // Tracker hidden via Settings
         lv_obj_t * btn = lv_btn_create(grid_container);
         lv_obj_set_size(btn, 112, 112); // Extra spacious 112x112 cells!
 
-        // Brushed Steel Border Logic
-        bool is_center = (i == 1 || i == 4 || i == 6);
+        // Brushed Steel Border Logic (centre column + the Tracker feature tile)
+        bool is_center = (i == 1 || i == 4 || i == 5);
         lv_color_t steel_color = is_center ? lv_color_hex(0xE0E0E0) : lv_color_hex(0x9A9A9A); // Brighter sides
 
         // Base styling (Normal State)
@@ -124,14 +133,52 @@ inline void build_grid_launcher() {
         // Disable scroll on buttons so swipe gestures scroll the parent grid container smoothly
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
 
-        lv_obj_t * img = lv_img_create(btn);
-        lv_img_set_src(img, imgs[i]);
-        lv_obj_align(img, LV_ALIGN_TOP_MID, 0, 10); // larger 48px icon moved closer to top
-        // Tint the icons with the steel theme
-        lv_obj_set_style_img_recolor(img, steel_color, 0);
-        lv_obj_set_style_img_recolor_opa(img, 255, 0);
-        lv_obj_set_style_img_recolor(img, lv_color_hex(0xFFFFFF), LV_STATE_PRESSED);
-        lv_obj_set_style_img_recolor_opa(img, 255, LV_STATE_PRESSED);
+        if (i == 5) {
+            // Procedural radar glyph: concentric rings + orange "me" dot + a blip,
+            // mirroring the Tracker screen itself. Recoloured to the steel theme.
+            lv_obj_t * radar = lv_obj_create(btn);
+            lv_obj_remove_style_all(radar);
+            lv_obj_set_size(radar, 46, 46);
+            lv_obj_align(radar, LV_ALIGN_TOP_MID, 0, 10);
+            lv_obj_clear_flag(radar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+            for (int r = 0; r < 3; r++) {
+                lv_obj_t * ring = lv_obj_create(radar);
+                lv_obj_remove_style_all(ring);
+                int d = 46 - r * 15;
+                lv_obj_set_size(ring, d, d);
+                lv_obj_center(ring);
+                lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+                lv_obj_set_style_bg_opa(ring, 0, 0);
+                lv_obj_set_style_border_width(ring, 2, 0);
+                lv_obj_set_style_border_color(ring, steel_color, 0);
+                lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+            }
+            lv_obj_t * medot = lv_obj_create(radar);
+            lv_obj_remove_style_all(medot);
+            lv_obj_set_size(medot, 9, 9);
+            lv_obj_center(medot);
+            lv_obj_set_style_radius(medot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(medot, lv_color_hex(0xFF6A00), 0);
+            lv_obj_set_style_bg_opa(medot, LV_OPA_COVER, 0);
+            lv_obj_clear_flag(medot, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_t * blip = lv_obj_create(radar);
+            lv_obj_remove_style_all(blip);
+            lv_obj_set_size(blip, 6, 6);
+            lv_obj_align(blip, LV_ALIGN_CENTER, 11, -9);
+            lv_obj_set_style_radius(blip, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(blip, lv_color_hex(0x00E5FF), 0);
+            lv_obj_set_style_bg_opa(blip, LV_OPA_COVER, 0);
+            lv_obj_clear_flag(blip, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        } else {
+            lv_obj_t * img = lv_img_create(btn);
+            lv_img_set_src(img, imgs[i]);
+            lv_obj_align(img, LV_ALIGN_TOP_MID, 0, 10); // larger 48px icon moved closer to top
+            // Tint the icons with the steel theme
+            lv_obj_set_style_img_recolor(img, steel_color, 0);
+            lv_obj_set_style_img_recolor_opa(img, 255, 0);
+            lv_obj_set_style_img_recolor(img, lv_color_hex(0xFFFFFF), LV_STATE_PRESSED);
+            lv_obj_set_style_img_recolor_opa(img, 255, LV_STATE_PRESSED);
+        }
 
         lv_obj_t * lbl = lv_label_create(btn);
         lv_label_set_text(lbl, labels[i]);

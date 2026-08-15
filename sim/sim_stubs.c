@@ -42,3 +42,4 @@ void switch_to_launcher(void)            { }
 // Grid launcher globals (shared grid_launcher_ui.h, included by sim_screens.cpp).
 lv_obj_t *grid_container = NULL;
 bool ignore_until_lift = false;
+bool tracker_enabled = true;   // sim always shows the Tracker tile

@@ -17,11 +17,21 @@
 #include "screen_game.h"
 #include "retro_engine.h"
 #include "screen_inclinometer.h"
+#include "convoy_ui.h"   // shared convoy/tracker radar (same header the sim renders)
+#include "gps.h"         // on-board NEO-M9N over I2C 0x42 (parser in gps_parse.h)
+#include "mag_mmc5983.h" // MMC5983MA magnetometer on the GPS extension header (I2C 0x30)
+#include "mag_heading.h" // tilt-compensated compass heading (needs the IMU angles)
+#include "gps_convoy.h"  // local fix -> convoy_set_self/_heading (outranks all sources)
+#include "convoy_link.h" // BLE client to the co-located Meshtastic T-Beam (NimBLE 2.x)
+#include "convoy_net.h"  // BLE peripheral: phone (Web Bluetooth) pushes the convoy roster
+#include "convoy_wifi.h" // WiFi STA: board pulls the roster from Firebase itself
+#include "convoy_source_ui.h" // source picker: choose Meshtastic (scan) or phone at runtime
 #include "PhotoFrameApp.h"
 #include "NesEngine.h"
 #include "sd_card_bsp.h"
 #include "OTAManager.h"
 #include "obd_parse.h"   // pure OBD-II PID parsers (also unit-tested on host)
+#include "obd_ble.h"     // ELM327 over BLE (FFF0/FFF1) — the alternative source
 #include <dirent.h>
 #include <unistd.h>
 #include <FFat.h>
@@ -80,6 +90,19 @@ static lv_obj_t * settings_screen = NULL;
 static int brightness_level = 8; // 1-10, default 8 (~200/255)
 int use_grid_launcher = 1; // 1 = grid, 0 = list
 int use_jimny_logo = 0; // 1 = jimny logo, 0 = custom/trailmaster (Default OFF as requested)
+bool tracker_enabled = true; // Settings toggle: show the Convoy Tracker launcher tile
+// Tracker "radio mode": while the Tracker is open it OWNS the radio — WiFi is
+// powered down (frees internal RAM/DMA) and BLE runs instead. WiFi+BLE+the AMOLED
+// don't fit in internal RAM together (BLE corrupts the display). The OBD worker
+// watches convoy_radio_mode and releases WiFi; convoy_obd_released acks it.
+volatile bool convoy_radio_mode = false;
+volatile bool convoy_obd_released = false;
+// ...except for the WiFi convoy source, which wants the WiFi STACK, not the raw
+// radio: it joins the owner's hotspot itself. Set alongside convoy_radio_mode to
+// tell the worker "stop touching WiFi" WITHOUT powering it down — no NimBLE is
+// coming, so the internal-RAM cliff that WIFI_OFF exists to dodge doesn't apply,
+// and a needless down/up would just cost seconds. See CONVOY_WIFI_PLAN.md.
+volatile bool convoy_wifi_mode = false;
 lv_obj_t * sel_bar = NULL;
 lv_obj_t * grid_container = NULL;
 
@@ -119,131 +142,79 @@ extern "C" {
 void switch_to_launcher();
 void force_full_ui_redraw(lv_obj_t * target_scr);
 void build_grid_launcher();
-extern void pf_show_upload_overlay(void);
+static void convoy_cancel_loads(void);   // defined with the convoy loaders, used by loop()
+extern void pf_show_upload_overlay(bool wifi_only);
+extern void pf_show_wifi_menu(void);
 extern bool pf_autostart_wifi;   // defined in PhotoFrameApp.cpp
 
 // --- SHARED UI LOGIC ---
 bool ignore_until_lift = false;
 
-// --- OBD Wi-Fi Connectivity Configuration ---
-const char* obd_ssid = "WiFi_OBDII"; 
-const char* obd_ip = "192.168.0.10";
-const uint16_t obd_port = 35000;
 
-void read_obd_response(WiFiClient& client, char* buffer, size_t max_len) {
-    unsigned long timeout = millis() + 1500; 
-    int len = 0;
-    while (millis() < timeout) {
-        if (client.available()) {
-            char c = client.read();
-            if (c == '\r' || c == '\n') continue; 
-            if (c == '>') { buffer[len] = '\0'; break; }
-            if (len < max_len - 1) buffer[len++] = c;
-        }
-        vTaskDelay(pdMS_TO_TICKS(1)); 
-    }
-    buffer[len] = '\0';
-}
+
 
 void obdBackgroundWorker(void *pvParameters) {
-    WiFiClient client;
-    char rx_buf[64];
-    uint32_t loop_counter = 0;
-    
     extern bool wifi_ap_running;
     while(1) {
         // Yield if we are in other heavy modes, if AP is running, or if OTA is active to prevent resource/WiFi conflicts
         const OTAStatus* ota_st = ota_get_status();
-        if (currentMode == MODE_PHOTOFRAME || currentMode == MODE_EMULATOR || wifi_ap_running || ota_st->state != OTA_IDLE) { 
-            if (client.connected()) { client.stop(); }
-            if (!wifi_ap_running && ota_st->state == OTA_IDLE) {
+
+        // ── BLE telemetry source ────────────────────────────────────────────
+        // One radio in use at a time, by choice rather than by necessity.
+        //
+        // BLE and WiFi DO coexist here — measured 2026-08-05 in this firmware:
+        // 201,992 free internal -> 138,812 after NimBLE init -> ~85,700 with the
+        // ELM327 client connected, against WiFi STA's 42 KB. Proven end to end
+        // with BLE OBD, WiFi, a TLS session and the Firebase roster all live at
+        // once. So the radio-handover handshake below is deletable.
+        //
+        // It is deliberately still here: retiring it is its own change, and
+        // keeping it means a regression in the convoy paths cannot be blamed on
+        // this. Until then the telemetry link stands down whenever the Tracker,
+        // the setup portal, the photo frame or an OTA wants the radio.
+        static bool wifi_parked = false;
+        const bool someone_else_wants_the_radio =
+            convoy_radio_mode ||                       // Tracker: BLE roles or its own WiFi
+            currentMode == MODE_PHOTOFRAME ||
+            currentMode == MODE_EMULATOR ||
+            wifi_ap_running ||                          // setup portal
+            ota_st->state != OTA_IDLE;
+
+        if (someone_else_wants_the_radio) {
+            if (obd_ble_state() != OBD_BLE_DOWN) {
+                Serial.println("[OBD] BLE link down — radio handed over");
+                obd_ble_end();
+            }
+            wifi_parked = false;
+            // The ack means "the radio is yours". With a BLE source we are
+            // not holding WiFi at all, so it is true as soon as our own BLE
+            // link is gone — no WiFi teardown to wait for.
+            convoy_obd_released = true;
+            vTaskDelay(pdMS_TO_TICKS(300));
+            continue;
+        }
+        convoy_obd_released = false;
+
+        // Reclaiming the radio: WiFi may still be up from the portal, an OTA
+        // or a previous WiFi-OBD session. Drop it once, so NimBLE gets its
+        // buffers from an uncontended heap rather than the 21-47 KB that
+        // used to make convoy_ble_init() fail.
+        if (!wifi_parked) {
+            if (WiFi.getMode() != WIFI_OFF) {
                 WiFi.disconnect(true, true);
+                WiFi.mode(WIFI_OFF);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                Serial.printf("[OBD] WiFi parked for BLE source (internal RAM=%u)\n",
+                              heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             }
-            vTaskDelay(pdMS_TO_TICKS(1000)); 
-            continue; 
+            wifi_parked = true;
         }
-        
-        // Ensure WiFi Connection in Station Mode
-        if (WiFi.status() != WL_CONNECTED) {
-            // Check one more time before committing to a 10s blocking WiFi attempt
-            if (ota_st->state != OTA_IDLE) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                continue;
-            }
-            Serial.println("[OBD] Connecting to WiFi_OBDII...");
-            WiFi.disconnect(true, true);
-            vTaskDelay(pdMS_TO_TICKS(100));
-            WiFi.mode(WIFI_STA);
-            esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
-            IPAddress local_IP(192, 168, 0, 11);
-            IPAddress gateway(192, 168, 0, 10);
-            IPAddress subnet(255, 255, 255, 0);
-            WiFi.config(local_IP, gateway, subnet);
-            WiFi.begin(obd_ssid);
-            int attempts = 0;
-            while (WiFi.status() != WL_CONNECTED && attempts < 20) { 
-                if (ota_get_status()->state != OTA_IDLE) {
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(500)); 
-                attempts++; 
-            }
-            if (WiFi.status() != WL_CONNECTED) {
-                Serial.println("[OBD] WiFi Connection Failed!");
-                vTaskDelay(pdMS_TO_TICKS(2000));
-                continue; 
-            }
-            Serial.println("[OBD] WiFi Connected!");
+
+        if (obd_ble_service()) {
+            bool gauge_active = (ui_uigauge != NULL && lv_scr_act() == ui_uigauge);
+            obd_ble_poll(gauge_active);
         }
-        
-        // Ensure TCP Client Connection to OBD ELM327 Hotspot
-        if (!client.connected()) {
-            Serial.println("[OBD] Connecting to ELM327 TCP port...");
-            if (client.connect(obd_ip, obd_port)) {
-                Serial.println("[OBD] ELM327 TCP Port Connected! Initializing adapter...");
-                client.print("ATZ\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                client.print("ATE E0\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-                vTaskDelay(pdMS_TO_TICKS(100));
-            } else { 
-                Serial.println("[OBD] Connection to ELM327 Failed!");
-                vTaskDelay(pdMS_TO_TICKS(1000)); 
-                continue; 
-            }
-        }
-        
-        // --- DYNAMIC SCREEN-BASED SELECTIVE POLL OBD OPTIMIZER ---
-        bool is_gauge_active = (ui_uigauge != NULL && lv_scr_act() == ui_uigauge);
-
-        if (is_gauge_active) {
-            // Read Coolant Temperature (PID 0105)
-            client.print("0105\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_coolant(rx_buf, (int*)&car_engine_temp);
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-            // Read Engine Load (PID 0104)
-            client.print("0104\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_load(rx_buf, (int*)&car_engine_load);
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-            // Read Battery Voltage (ATRV)
-            client.print("ATRV\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_voltage(rx_buf, (float*)&car_voltage);
-            vTaskDelay(pdMS_TO_TICKS(10));
-        } else {
-            // Read Engine RPM (PID 010C)
-            client.print("010C\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_rpm(rx_buf, (int*)&car_rpm);
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-            // Read Vehicle Speed (PID 010D)
-            client.print("010D\r"); read_obd_response(client, rx_buf, sizeof(rx_buf));
-            obd_parse_speed(rx_buf, (int*)&car_speed);
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        
-        loop_counter++;
-        vTaskDelay(pdMS_TO_TICKS(20)); 
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -462,7 +433,7 @@ void build_settings_screen() {
     lv_obj_add_flag(row_wifi, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t * lbl_wifi_s = lv_label_create(row_wifi);
-    lv_label_set_text(lbl_wifi_s, "Wifi settings");
+    lv_label_set_text(lbl_wifi_s, "Companion app & wifi");
     lv_obj_set_style_text_font(lbl_wifi_s, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_wifi_s, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_wifi_s, LV_ALIGN_LEFT_MID, 14, 0);
@@ -473,7 +444,7 @@ void build_settings_screen() {
     lv_obj_align(arrow_wifi, LV_ALIGN_RIGHT_MID, -18, 0);
 
     lv_obj_add_event_cb(row_wifi, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // networks | access companion app
     }, LV_EVENT_ALL, NULL);
 
     make_settings_section_header(scr_rows, "MODES");
@@ -560,6 +531,41 @@ void build_settings_screen() {
         p.putInt("grid_launcher", use_grid_launcher);
         p.end();
         Serial.printf("[SETTINGS] Grid Launcher set to %d\n", use_grid_launcher);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // ─── ROW 1.8: Convoy Tracker Toggle ──────────────────────────────────────
+    lv_obj_t * row_trk = lv_obj_create(scr_rows);
+    lv_obj_set_size(row_trk, 430, 80);
+    lv_obj_set_style_bg_color(row_trk, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(row_trk, 255, 0);
+    lv_obj_set_style_border_width(row_trk, 1, 0);
+    lv_obj_set_style_border_color(row_trk, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(row_trk, 12, 0);
+    lv_obj_clear_flag(row_trk, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * lbl_trk = lv_label_create(row_trk);
+    lv_label_set_text(lbl_trk, "Convoy Tracker");
+    lv_obj_set_style_text_font(lbl_trk, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(lbl_trk, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(lbl_trk, LV_ALIGN_LEFT_MID, 14, 0);
+
+    lv_obj_t * sw_trk = lv_switch_create(row_trk);
+    lv_obj_align(sw_trk, LV_ALIGN_RIGHT_MID, -20, 0);
+    lv_obj_set_size(sw_trk, 60, 30);
+    lv_obj_set_style_bg_color(sw_trk, lv_color_hex(0xFF6A00), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
+    if (tracker_enabled) lv_obj_add_state(sw_trk, LV_STATE_CHECKED);
+    else lv_obj_clear_state(sw_trk, LV_STATE_CHECKED);
+
+    lv_obj_add_event_cb(sw_trk, [](lv_event_t * e) {
+        if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+        lv_obj_t * obj = lv_event_get_target(e);
+        tracker_enabled = lv_obj_has_state(obj, LV_STATE_CHECKED);
+        Preferences p;
+        p.begin("hellojimny", false);
+        p.putInt("tracker_en", tracker_enabled ? 1 : 0);
+        p.end();
+        Serial.printf("[SETTINGS] Convoy Tracker set to %d\n", tracker_enabled);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
     make_settings_section_header(scr_rows, "BOOT IMAGE");
@@ -959,18 +965,19 @@ void build_about_screen() {
     lv_obj_set_style_text_font(lbl_btn_check, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_btn_check);
 
-    // 2. "Wifi settings" — plain tappable text (no button box)
+    // 2. "Companion app & wifi" — plain tappable text (no button box)
     lv_obj_t * lbl_wifi = lv_label_create(scr_rows);
-    lv_label_set_text(lbl_wifi, "Wifi settings");
+    lv_label_set_text(lbl_wifi, "Companion app & wifi");
     lv_obj_set_style_text_font(lbl_wifi, &ui_font_rajdhani1, 0);
     lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0xCCCCCC), 0);
     lv_obj_set_style_pad_ver(lbl_wifi, 14, 0);          // taller hit area
     lv_obj_add_flag(lbl_wifi, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(lbl_wifi, 24);            // easier to tap
 
-    extern void pf_show_upload_overlay(void);
+    extern void pf_show_upload_overlay(bool wifi_only);
+    extern void pf_show_wifi_menu(void);
     lv_obj_add_event_cb(lbl_wifi, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_upload_overlay();
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // networks | access companion app
     }, LV_EVENT_ALL, NULL);
 
     // "Check for Update" opens the OTA overlay; all status/progress shows there.
@@ -1561,8 +1568,16 @@ void setup() {
         p.begin("hellojimny", false);
         use_jimny_logo = p.getInt("jimny_logo", 0); // Default to 0 (Trailmaster)
         use_grid_launcher = p.getInt("grid_launcher", 1); // Default to 1 (Grid launcher on)
+        tracker_enabled = p.getInt("tracker_en", 1) ? true : false; // Default ON
+        // Same namespace, and read here rather than left to load_speedo_preferences()
+        // finding a caller: "Set as default" saved to NVS correctly, but NOTHING
+        // ever read it back, so default_speedometer kept its initialiser 0 every
+        // boot and the choice silently never applied. Read before show_boot_splash()
+        // — the boot-screen decision downstream keys off this value.
+        default_speedometer = p.getInt("def_speedo", 0);
         p.end();
-        Serial.printf("[SETTINGS] Pre-splash: grid_launcher = %d, jimny_logo = %d\n", use_grid_launcher, use_jimny_logo);
+        Serial.printf("[SETTINGS] Pre-splash: grid_launcher = %d, jimny_logo = %d, def_speedo = %d\n",
+                      use_grid_launcher, use_jimny_logo, default_speedometer);
     }
     
     lv_obj_t * splash = show_boot_splash(); 
@@ -1725,7 +1740,19 @@ void setup() {
     if (ui_uiScreenGame) lv_obj_add_event_cb(ui_uiScreenGame, app_dino_jump_trigger, LV_EVENT_PRESSED, NULL);
 
     // Spawn core-0 dedicated OBD background telemetry parsing engine
-    xTaskCreatePinnedToCore(obdBackgroundWorker, "OBD_Task", 8192, NULL, 1, NULL, 0);
+    // The BLE path runs a NimBLE client, a GATT scan and the ELM327 conversation
+    // on this task; 8 KB was sized for the old WiFi/TCP path and overflows.
+    xTaskCreatePinnedToCore(obdBackgroundWorker, "OBD_Task", 12288, NULL, 1, NULL, 0);
+
+    // On-board NEO-M9N GPS (I2C 0x42, shares the touch bus). Must come after
+    // Touch_Init() installed the I2C driver. Unlike the convoy link this runs
+    // for the whole session rather than per-screen: a position is useful to the
+    // speedometer and the clock too, and it costs ~1.5% of the bus.
+    gps_begin();
+    mag_begin();   // MMC5983MA on the GPS extension header; same bus, after Touch_Init()
+    // NOTE: the Convoy BLE link is NOT started here — it spins up only when the
+    // user opens the Tracker screen (convoy_open_screen) and is torn down on exit,
+    // so BLE never competes with WiFi/OBD for internal RAM during normal use.
 
     // Boot into default speedometer dynamically without conflicting with ui.c animations
     if (default_speedometer == 1) {
@@ -1742,11 +1769,19 @@ void setup() {
         // Empty SD card? (browser-flash leaves NVS creds intact, so also key off
         // missing SD content — trailmaster.bmp is part of the standard SD set.)
         FILE* fc = fopen("/sd_card/trailmaster.bmp", "r");
-        bool sd_missing = (fc == NULL);
+        (void)fc;   // SD presence no longer gates Wi-Fi onboarding
         if (fc) fclose(fc);
-        if (no_creds || sd_missing) {
+        // Wi-Fi onboarding keys off Wi-Fi state ONLY.
+        //
+        // This was `no_creds || sd_missing`, which opened the setup overlay on
+        // every boot whenever /sd_card/trailmaster.bmp was absent — regardless of
+        // how many networks were saved. The SD check was meant as a proxy for
+        // "freshly browser-flashed", but it fires when that one file is deleted,
+        // renamed, or the card is simply used for something else. Whether the
+        // photo set is on the card says nothing about whether Wi-Fi is set up.
+        if (no_creds) {
             pf_autostart_wifi = true;
-            pf_show_upload_overlay();   // overlay sits over the speedometer; X reveals it
+            pf_show_upload_overlay(true);   // first run: Wi-Fi setup; overlay sits over the speedometer; X reveals it
         }
         lv_timer_del(t);
     }, 2000, NULL);
@@ -1759,6 +1794,8 @@ void loop() {
     last_tick = millis();
 
     if (launcher_pending) { launcher_pending = false; switch_to_launcher(); }
+
+    mag_debug_tick();   // TEMPORARY: compass bring-up diagnostics, 2 s cadence
 
     if (currentMode != MODE_EMULATOR) {
         lv_timer_handler();
@@ -1797,6 +1834,18 @@ void loop() {
                 imu_ready = false;
                 Serial.println("[IMU] Sensors DISABLED - screen exited");
             }
+            // LEAVING the tracker (radar OR either picker page): tear down the BLE
+            // link to free RAM for WiFi/OBD. Moving between radar ⇄ picker stays in.
+            bool prev_cvy = (prev_act_scr == convoy_screen ||
+                             prev_act_scr == convoy_src_screen ||
+                             prev_act_scr == convoy_src_scan_screen);
+            bool act_cvy  = (act_scr == convoy_screen ||
+                             act_scr == convoy_src_screen ||
+                             act_scr == convoy_src_scan_screen);
+            // Cancel pending loads BEFORE stopping the link: a load armed inside the
+            // Tracker would otherwise still fire (up to 4s later) and yank a rebuilt
+            // convoy screen back over the launcher.
+            if (prev_cvy && !act_cvy) { convoy_cancel_loads(); convoy_link_stop(); }
             prev_act_scr = act_scr;
             screen_load_time = millis();
         }
@@ -1940,3 +1989,610 @@ extern "C" {
 // Shared with the simulator (sim/) — see grid_launcher_ui.h. Editing that
 // file changes what BOTH the device and the sim render; there's only one copy.
 #include "grid_launcher_ui.h"
+
+// ─── TRACKER (convoy radar) ───────────────────────────────────────────────
+// PROTOTYPE: driven by mock data so it renders on the device today. To switch
+// to the real Meshtastic T-Beam feed, add NimBLE-Arduino, then in setup()
+//   #include "convoy_link.h"  →  convoy_link_begin(); + a FreeRTOS task calling
+//   convoy_link_loop();  and delete convoy_mock_tick (convoy_link feeds the same
+//   convoy_set_self/heading/car). convoy_refresh() must stay on this UI thread.
+// BLE link to the T-Beam runs ONLY while the Tracker screen is open, so it never
+// fights WiFi/OBD for internal RAM during normal use. Started in
+// convoy_open_screen(), stopped when the user leaves the Tracker (loop()).
+static TaskHandle_t convoyTaskHandle = NULL;
+static volatile bool convoyRun = false;
+
+// ── Runtime convoy source (replaces the old compile-time CONVOY_SOURCE_NET) ───
+// The user picks the source on-device (convoy_source_ui.h); the BLE task brings
+// up the matching NimBLE role and switches when the selection changes.
+// Three ROLE CLASSES live in here, not just three sources:
+//   CVS_SCAN / CVS_MESH  → NimBLE central   (radio: BLE, WiFi powered down)
+//   CVS_PHONE            → NimBLE peripheral(radio: BLE, WiFi powered down)
+//   CVS_CLOUD            → WiFi STA         (radio: WiFi up, no NimBLE at all)
+// Switching between the BLE classes is a NimBLE role change; switching to or from
+// CVS_CLOUD additionally changes which radio we hold, which means re-negotiating
+// the handover with the OBD worker. BLE and WiFi cannot be up together on this
+// build (see CONVOY_KEEP_WIFI below), so those teardowns are strictly ordered.
+typedef enum { CVS_NONE, CVS_SCAN, CVS_MESH, CVS_PHONE, CVS_CLOUD } cvs_source_t;
+static volatile cvs_source_t convoy_src_sel = CVS_NONE;   // what the UI wants
+static volatile bool convoy_role_ready = false;           // task set: the role is up
+static volatile bool convoy_radio_failed = false;         // task set: BLE bring-up failed
+static char convoy_sel_mac[18] = {0};                     // chosen T-Beam MAC (mesh)
+static const char * CONVOY_PHONE_URL = "tinyurl.com/trailmstr";
+
+// SPIKE (2026-07-28): build_opt.h (flags-only file — NO comments allowed there,
+// it is a raw GCC response file) sets CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL,
+// which moves NimBLE *host* allocations to PSRAM instead of internal RAM. The
+// ESP-IDF BT *controller* buffers stay internal, hence the heap logging below.
+// If enough internal RAM stays free for WiFi, BLE and WiFi/OBD coexist and the
+// whole radio-handover handshake can be deleted.
+//
+// With that in place, try keeping WiFi UP. The handover below is the suspected
+// crash: convoyLinkTask
+// waits only 4s for the OBD worker's ack, then powers the WiFi stack down from
+// a DIFFERENT task — while that worker may still be blocked inside WiFi.begin()
+// (up to ~10s) or a socket read. Set to 0 to restore the old handover.
+// SPIKE RESULT (2026-07-28): 1 = FAILS. With WiFi/AP up the BT *controller*
+// cannot get its buffers: "BLE_INIT: Malloc failed / esp_bt_controller_init -4"
+// at 21-47KB free internal. PSRAM host alloc does not help — the failure is
+// controller-side. Left at 0; BLE and WiFi cannot coexist on this build.
+#define CONVOY_KEEP_WIFI 0
+
+// Re-negotiate the radio with the OBD worker for a NEW class.
+//
+// The initial handover happens once at task start, but the source can change
+// afterwards, and the ack does not mean the same thing for both classes: for BLE
+// it means "WiFi is powered down", for CVS_CLOUD it means "I have let go of WiFi
+// but left the STA up". Clearing convoy_obd_released with convoy_radio_mode
+// still set makes the worker redo its teardown under the new convoy_wifi_mode.
+//
+// Returns false if the worker never acks (an OTA is running, or it is wedged) —
+// in which case we leave the radio exactly as it was rather than half-owning it.
+static bool convoy_radio_renegotiate(bool want_wifi) {
+    if (convoy_wifi_mode == want_wifi && convoy_obd_released) return true;
+    convoy_wifi_mode    = want_wifi;
+    convoy_obd_released = false;                      // force a fresh ack
+    const uint32_t deadline = millis() + 12000;       // > the worker's ~10s connect
+    while (!convoy_obd_released && millis() < deadline) vTaskDelay(pdMS_TO_TICKS(50));
+    if (!convoy_obd_released) {
+        Serial.println("[CVY] radio re-negotiation NOT acked — leaving it to OBD");
+        return false;
+    }
+    Serial.printf("[CVY] radio now %s; internal=%u\n",
+                  want_wifi ? "WiFi (STA)" : "BLE (WiFi off)",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    return true;
+}
+
+static void convoyLinkTask(void * arg) {
+    (void)arg;
+#if CONVOY_KEEP_WIFI
+    Serial.printf("[CVY] keep-WiFi spike: internal=%u psram=%u wifi_status=%d — BLE task up\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (int)WiFi.status());
+#else
+    // ── Acquire the radio. The OBD worker OWNS WiFi; this task only asks and waits
+    // for its ack. It must never call a WiFi API itself — doing that from here while
+    // the worker could still be inside a blocking WiFi.begin() is precisely what
+    // corrupted the handover and left NimBLE initialising at ~46KB free.
+    //
+    // The ack is now MANDATORY. If it never arrives (an OTA is running, or the worker
+    // is wedged) we do NOT force the radio down: report it unavailable and exit,
+    // leaving WiFi/OBD exactly as they were. A visible "Radio unavailable / Tap to
+    // retry" beats half-owning the radio.
+    convoy_radio_mode = true;
+    const uint32_t ack_deadline = millis() + 12000;   // > the worker's ~10s connect
+    while (!convoy_obd_released && millis() < ack_deadline) vTaskDelay(pdMS_TO_TICKS(50));
+    if (!convoy_obd_released) {
+        Serial.println("[CVY] WiFi handover NOT acked — leaving the radio to OBD");
+        convoy_radio_mode   = false;
+        convoy_radio_failed = true;
+        convoy_role_ready   = true;   // release the UI's wait-for-role loader at once
+        convoyRun           = false;
+        convoyTaskHandle    = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+    Serial.printf("[CVY] radio acquired (OBD acked); internal RAM=%u — BLE task up\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
+
+    cvs_source_t running = CVS_NONE;              // which BLE role is actually up
+    while (convoyRun) {
+        cvs_source_t want = convoy_src_sel;
+        if (want != running) {
+            bool was_c  = (running == CVS_SCAN || running == CVS_MESH);
+            bool want_c = (want == CVS_SCAN   || want == CVS_MESH);
+            if (was_c && want_c) {
+                // central → central (scan ⇄ mesh): keep NimBLE up, just retarget.
+                if (want == CVS_SCAN) convoy_link_rescan();
+                else                  convoy_link_connect_mac(convoy_sel_mac);
+            } else {
+                // role-class change or to/from NONE: full teardown then bring-up.
+                if (was_c) convoy_link_end();
+                else if (running == CVS_PHONE) convoy_net_end();
+                else if (running == CVS_CLOUD) convoy_wifi_end();
+                // Settle before bringing up the new role: lets the prior NimBLE
+                // stack fully tear down AND the display's full-redraw DMA finish,
+                // so the new NimBLE init doesn't collide with either.
+                vTaskDelay(pdMS_TO_TICKS(400));
+                // If the RADIO changes hands (BLE ⇄ WiFi), re-negotiate before
+                // bringing anything up. Order matters and is not negotiable: the
+                // old stack is already down above, and the BT controller cannot
+                // get its buffers while the WiFi stack is up (or vice versa), so
+                // the radio must have finished changing before the new bring-up.
+                bool ok = convoy_radio_renegotiate(want == CVS_CLOUD);
+                // Bring-up can FAIL (BT controller out of internal RAM, or no
+                // reachable network). Record it instead of ploughing on into
+                // calls that would assert and reboot — UI shows "Radio unavailable".
+                if (ok) {
+                    if (want == CVS_SCAN)       ok = convoy_link_begin_scan();
+                    else if (want == CVS_MESH)  { ok = convoy_link_begin_scan(); if (ok) convoy_link_connect_mac(convoy_sel_mac); }
+                    else if (want == CVS_PHONE) ok = convoy_net_begin();
+                    else if (want == CVS_CLOUD) ok = convoy_wifi_begin();
+                }
+                convoy_radio_failed = !ok;
+            }
+            running = want;
+            convoy_role_ready = true;      // UI may now load the radar (init done or failed)
+            Serial.printf("[CVY] role -> %d  internal=%u psram=%u wifi_status=%d\n",
+                          (int)running, heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                          heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (int)WiFi.status());
+        }
+        if (running == CVS_SCAN || running == CVS_MESH) convoy_link_loop();
+        else if (running == CVS_CLOUD)                  convoy_wifi_loop();
+
+        // Name the live link on the card. Mesh/phone/cloud all render the same
+        // radar, so without this an empty scope gives no clue whether the source
+        // is wrong, the room code is wrong, or the link is simply down.
+        {
+            char room[CONVOY_CFG_ROOM_MAX] = {0};
+            char call[CONVOY_CFG_CALL_MAX] = {0};
+            convoy_cfg_get_callsign(call, sizeof(call));
+            convoy_set_self_name(call);      // radar + order list show the callsign
+            switch (running) {
+                case CVS_SCAN:
+                case CVS_MESH:
+                    convoy_set_link("MESH", NULL,
+                                    convoy_link_status() == CONVOY_LINK_ONLINE);
+                    break;
+                case CVS_PHONE:
+                    convoy_set_link("PHONE", NULL, convoy_ble_up());
+                    break;
+                case CVS_CLOUD:
+                    convoy_cfg_get_room(room, sizeof(room));
+                    convoy_set_link("WIFI", room[0] ? room : "--",
+                                    WiFi.status() == WL_CONNECTED);
+                    break;
+                default:
+                    convoy_set_link(NULL, NULL, false);
+                    break;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (running == CVS_SCAN || running == CVS_MESH) convoy_link_end();
+    else if (running == CVS_PHONE) convoy_net_end();
+    else if (running == CVS_CLOUD) convoy_wifi_end();
+
+    // ── Release the radio back to WiFi/OBD (worker re-inits WiFi on its own).
+    convoy_radio_mode = false;   // no-op under CONVOY_KEEP_WIFI (never set)
+    convoy_wifi_mode  = false;   // next arm starts from the BLE-style handover
+    Serial.printf("[CVY] link task down; internal=%u wifi_status=%d\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (int)WiFi.status());
+    convoyTaskHandle = NULL;
+    vTaskDelete(NULL);
+}
+
+// Master switch for the BLE link. ON: the Tracker enters "radio mode" — WiFi is
+// powered down first (convoyLinkTask), freeing the internal RAM that NimBLE
+// otherwise collided with (which corrupted the AMOLED). BLE runs while the
+// Tracker is open; leaving hands the radio back to WiFi/OBD.
+#define CONVOY_BLE_ENABLE 1
+
+static void convoy_link_start(void) {
+#if CONVOY_BLE_ENABLE
+    if (convoyTaskHandle || !tracker_enabled) return;
+    convoyRun = true;
+    xTaskCreatePinnedToCore(convoyLinkTask, "Convoy_BLE", 12288, NULL, 1, &convoyTaskHandle, 0);
+#endif
+}
+static void convoy_link_stop(void) { convoyRun = false; }   // task self-cleans
+
+// Clean screen loader for the picker flow. Two jobs, both to avoid the BLE task's
+// NimBLE role switch (which grabs/frees internal DMA RAM) colliding with the
+// display transition — that collision corrupts the AMOLED flush and, on the
+// heavier central→peripheral switch, crashes:
+//   1. defer the load OUT of the LVGL event, then force a full panel redraw;
+//   2. apply the pending source change ONLY AFTER the redraw settles, so the BLE
+//      switch never overlaps the heavy render.
+static lv_obj_t *  convoy_pending_scr = NULL;
+static cvs_source_t convoy_pending_sel = CVS_NONE;
+static bool        convoy_apply_sel   = false;
+static bool        convoy_load_busy   = false;  // a load (either kind) is in flight
+static lv_obj_t *  convoy_ready_scr   = NULL;   // target of a wait-for-role load
+static lv_timer_t * convoy_defer_timer = NULL;  // in-flight convoy_load_clean
+static lv_timer_t * convoy_ready_timer = NULL;  // in-flight convoy_load_when_ready
+static lv_timer_t * convoy_autoarm_timer = NULL;      // pending staggered auto-arm
+static cvs_source_t convoy_autoarm_sel   = CVS_NONE;  // source it will arm
+// Abandon any in-flight screen load. Both loaders are lv_timers that fire LATER —
+// the wait-for-role one up to 4s later — and then call lv_scr_load() on a convoy
+// screen. If the user has left the Tracker by then, that screen is no longer the
+// one on display and convoy_open_screen() rebuilds it on the next visit, so a late
+// fire dereferences a stale object: the LoadProhibited panic inside lv_obj_set_pos
+// when swiping down to the launcher. Cancel them on the way out.
+static void convoy_cancel_loads(void) {
+    if (convoy_defer_timer)   { lv_timer_del(convoy_defer_timer);   convoy_defer_timer   = NULL; }
+    if (convoy_ready_timer)   { lv_timer_del(convoy_ready_timer);   convoy_ready_timer   = NULL; }
+    if (convoy_autoarm_timer) { lv_timer_del(convoy_autoarm_timer); convoy_autoarm_timer = NULL; }
+    convoy_autoarm_sel = CVS_NONE;   // left before the stagger elapsed — don't arm
+    convoy_pending_scr = NULL;
+    convoy_ready_scr   = NULL;
+    convoy_apply_sel   = false;
+    convoy_load_busy   = false;
+}
+// True only while a convoy screen is the one actually showing.
+//
+// Loading a screen from a timer when we are NOT in the Tracker is what panics: our
+// screens are build-once and never freed, so the bad pointer is not ours — it is
+// LVGL's internal d->scr_to_load. lv_scr_load() re-enters lv_scr_load_anim(), which,
+// if another screen-load ANIMATION is still in flight, "finishes" it immediately via
+//     lv_obj_set_pos(d->scr_to_load, 0, 0)      (lv_disp.c:236)
+// and can lv_obj_del(act_scr) when that load asked for auto_del — which the
+// speedometer's 800ms fade does. So a late convoy load landing mid-transition
+// dereferences another screen's half-finished animation state.
+static bool convoy_ui_active(void) {
+    lv_obj_t * a = lv_scr_act();
+    return a && (a == convoy_screen || a == convoy_src_screen || a == convoy_src_scan_screen);
+}
+static void convoy_deferred_load_cb(lv_timer_t * t) {
+    convoy_defer_timer = NULL;
+    if (!convoy_ui_active()) {          // navigated away mid-transition — abandon
+        convoy_pending_scr = NULL; convoy_apply_sel = false; convoy_load_busy = false;
+        lv_timer_del(t);
+        return;
+    }
+    if (convoy_pending_scr && lv_obj_is_valid(convoy_pending_scr)) {
+        lv_scr_load(convoy_pending_scr);
+        force_full_ui_redraw(convoy_pending_scr);
+        convoy_pending_scr = NULL;
+    }
+    // A source change queued for a static screen (the scan page): apply it AFTER
+    // the load so the NimBLE init runs while that page is idle, not mid-render.
+    if (convoy_apply_sel) { convoy_role_ready = false; convoy_src_sel = convoy_pending_sel; convoy_apply_sel = false; }
+    if (!convoy_ready_scr) convoy_load_busy = false;
+    lv_timer_del(t);
+}
+static void convoy_load_clean(lv_obj_t * scr) {
+    // Drop repeat/no-op taps: every load forces a full 466×466 redraw, and
+    // stacking those (tapping ACQUIRING several times) piles up heavy renders.
+    if (convoy_load_busy || lv_scr_act() == scr) return;
+    convoy_load_busy   = true;
+    convoy_pending_scr = scr;
+    convoy_defer_timer = lv_timer_create(convoy_deferred_load_cb, 40, NULL);
+}
+// Queue a source change to apply after the next clean load (macro avoids the
+// Arduino auto-prototype hoisting a cvs_source_t parameter above its typedef).
+#define convoy_switch_source(s) do { convoy_pending_sel = (s); convoy_apply_sel = true; } while (0)
+
+// Load a screen ONLY once the BLE task reports the pending role change is fully
+// done (NimBLE init/deinit finished). Until then the currently shown (static,
+// non-rendering) page stays up, so the heavy redraw never overlaps a radio
+// transition — the collision that crashed (phone) and corrupted the flush
+// (mesh). Used in BOTH directions: picker → radar and radar → picker. ~4s cap.
+static uint32_t convoy_ready_t0 = 0;
+static void convoy_ready_load_cb(lv_timer_t * t) {
+    if (!convoy_role_ready && millis() - convoy_ready_t0 <= 4000) return;
+    lv_obj_t * scr = convoy_ready_scr ? convoy_ready_scr : convoy_screen;
+    convoy_ready_scr   = NULL;
+    convoy_ready_timer = NULL;
+    lv_timer_del(t);
+    if (!convoy_ui_active()) {          // see convoy_deferred_load_cb — never load from here
+        convoy_load_busy = false;       // once the user has navigated away
+        return;
+    }
+    if (scr && lv_obj_is_valid(scr)) {
+        lv_scr_load(scr);
+        force_full_ui_redraw(scr);
+    }
+    convoy_load_busy = false;
+}
+static void convoy_load_when_ready(lv_obj_t * scr) {
+    bool running = (convoy_ready_scr != NULL);
+    convoy_ready_scr = scr;
+    convoy_load_busy = true;
+    if (!running) {
+        convoy_ready_t0 = millis();
+        convoy_ready_timer = lv_timer_create(convoy_ready_load_cb, 120, NULL);
+    }
+}
+// Arm the radio. The BLE task is spawned only from here — either an explicit source
+// tap, or the staggered auto-arm below.
+static void convoy_radio_arm(void) {
+    convoy_radio_failed = false;
+    convoy_link_start();               // no-op if the task is already running
+}
+
+// ── Staggered auto-arm ───────────────────────────────────────────────────────
+// Let the screen finish arriving BEFORE the radio comes up. Arming inline in
+// convoy_open_screen() stacked NimBLE bring-up (and the WiFi handover it triggers)
+// on top of the entry fade still animating — and a screen-load animation in flight
+// is exactly when LVGL's loader is fragile: a load landing then runs the
+// "finish the previous one immediately" path in lv_scr_load_anim(), which can
+// lv_obj_del() the screen currently showing. Separating the two in time removes the
+// overlap instead of guarding against it. The delay is free in practice: the link
+// takes seconds to establish anyway, so nothing arrives later than it used to.
+#define CONVOY_AUTOARM_DELAY_MS 700    // > the 250ms entry fade, with margin
+static void convoy_autoarm_cb(lv_timer_t * t) {
+    convoy_autoarm_timer = NULL;
+    lv_timer_del(t);
+    cvs_source_t want  = convoy_autoarm_sel;
+    convoy_autoarm_sel = CVS_NONE;
+    if (want == CVS_NONE) return;
+    if (!convoy_ui_active()) return;   // user left during the stagger — stay off the radio
+    convoy_radio_arm();
+    convoy_role_ready = false;
+    convoy_src_sel    = want;
+}
+// Macro, not a function: an Arduino auto-prototype taking cvs_source_t would be
+// hoisted above the typedef (same reason convoy_switch_source is a macro).
+#define convoy_autoarm_schedule(s) do {                                              \
+    convoy_autoarm_sel = (s);                                                        \
+    if (convoy_autoarm_timer) lv_timer_del(convoy_autoarm_timer);                    \
+    convoy_autoarm_timer = lv_timer_create(convoy_autoarm_cb,                        \
+                                           CONVOY_AUTOARM_DELAY_MS, NULL);           \
+} while (0)
+// Start a BLE role switch NOW (picker still shown → display idle), then load the
+// radar once the role is up.
+static void convoy_select_source_mesh(void) {
+    convoy_radio_arm();
+    convoy_role_ready = false; convoy_src_sel = CVS_MESH;
+    convoy_load_when_ready(convoy_screen);
+}
+static void convoy_select_source_phone(void) {
+    convoy_radio_arm();
+    convoy_role_ready = false; convoy_src_sel = CVS_PHONE;
+    convoy_load_when_ready(convoy_screen);
+}
+static void convoy_select_source_cloud(void) {
+    convoy_radio_arm();
+    convoy_role_ready = false; convoy_src_sel = CVS_CLOUD;
+    convoy_load_when_ready(convoy_screen);
+}
+
+// ── Source-picker callbacks (UI thread) ──────────────────────────────────────
+static int convoy_scan_rendered = -1;    // last device count rendered into the list
+
+static void fw_src_scan(void) {           // tapped MESHTASTIC → start scanning
+    convoy_scan_rendered = -1;
+    convoy_radio_arm();                    // first explicit action that needs the radio
+    convoy_switch_source(CVS_SCAN);        // applied after the scan page loads
+}
+static void fw_src_pick(int idx) {        // tapped a T-Beam → connect + persist
+    convoy_scan_dev_t * arr; int n = convoy_link_scan_list(&arr);
+    if (idx < 0 || idx >= n) return;
+    strncpy(convoy_sel_mac, arr[idx].mac, sizeof(convoy_sel_mac) - 1);
+    convoy_sel_mac[sizeof(convoy_sel_mac) - 1] = 0;
+    Preferences p; p.begin("convoy", false);
+    p.putString("tbeam_mac", convoy_sel_mac);
+    p.putInt("source", 1);
+    p.end();
+    convoy_set_wait_text(NULL, NULL);
+    convoy_set_self(0, 0, false);         // clear any stale position from the old source
+    convoy_select_source_mesh();          // switch now (picker stays up), radar loads when ready
+}
+static void fw_src_phone(void) {          // tapped USE PHONE → advertise + persist
+    Preferences p; p.begin("convoy", false);
+    p.putInt("source", 2);
+    p.end();
+    convoy_set_wait_text("Connect via browser", CONVOY_PHONE_URL);
+    convoy_set_self(0, 0, false);
+    convoy_select_source_phone();         // switch now (picker stays up), radar loads when ready
+}
+static void fw_src_cloud(void) {          // tapped CONVOY → WiFi + Firebase, persist
+    Preferences p; p.begin("convoy", false);
+    p.putInt("source", 3);
+    p.end();
+    convoy_set_wait_text("Joining Wi-Fi", "Hotspot on?");
+    convoy_set_self(0, 0, false);
+    convoy_select_source_cloud();
+}
+// X on page 1 → back to the radar, keeping the chosen source. If the user backed
+// out WITHOUT choosing one, the scan-only role is still up (CVS_SCAN): drop it to
+// CVS_NONE so a NimBLE scan isn't left running behind the radar, and wait for that
+// teardown before loading — an active scan colliding with the full-panel redraw is
+// what rebooted the board when tapping ACQUIRING with no source selected.
+static void fw_src_back(void) {
+    if (convoy_src_sel == CVS_SCAN) {
+        convoy_set_wait_text("No source selected", "Tap to choose");
+        convoy_role_ready = false;
+        convoy_src_sel    = CVS_NONE;
+        convoy_load_when_ready(convoy_screen);
+    } else {
+        convoy_load_clean(convoy_screen);
+    }
+}
+
+static void fw_open_picker(void) {        // radar panel tapped → open the picker
+    if (convoy_load_busy) return;         // a transition is already in flight
+    convoy_src_build_screen();
+    convoy_src_on_scan        = fw_src_scan;
+    convoy_src_on_pick_device = fw_src_pick;
+    convoy_src_on_use_phone   = fw_src_phone;
+    convoy_src_on_use_cloud   = fw_src_cloud;
+    convoy_src_on_back        = fw_src_back;
+    convoy_src_reset();
+    if (convoy_src_sel == CVS_SCAN) {     // stray scan still running → stop it first
+        convoy_role_ready = false;
+        convoy_src_sel    = CVS_NONE;
+        convoy_load_when_ready(convoy_src_screen);
+    } else {
+        convoy_load_clean(convoy_src_screen);
+    }
+}
+
+// Render live BLE scan results into the picker list (UI thread; the task fills s_scan).
+static void convoy_picker_tick(lv_timer_t * t) {
+    (void)t;
+    if (lv_scr_act() != convoy_src_scan_screen) return;
+    convoy_scan_dev_t * arr; int n = convoy_link_scan_list(&arr);
+    if (n != convoy_scan_rendered) {
+        convoy_scan_rendered = n;
+        convoy_src_clear_devices();
+        for (int i = 0; i < n && i < CVSRC_MAX_DEV; i++)
+            convoy_src_add_device(arr[i].name, arr[i].rssi);
+        convoy_src_set_scanning(n == 0);
+    }
+}
+
+static void convoy_mock_tick(lv_timer_t * t) {
+    (void)t;
+    if (lv_scr_act() != convoy_screen) return;
+#if CONVOY_BLE_ENABLE
+    // Runtime source: no top status pill (the waiting card carries the messaging
+    // now). The BLE task's convoy_set_* data drives the radar; before a source
+    // connects, convoy_self_fix is false so the tappable waiting panel shows.
+    // Radio bring-up failed (BT controller out of internal RAM): say so on the
+    // waiting panel instead of sitting on ACQUIRING forever. Tapping it reopens
+    // the picker, which retries.
+    // The radar only leaves the waiting panel once a position arrives, so a linked
+    // T-Beam sitting indoors (Meshtastic reports 0,0 = no fix) looked identical to
+    // "never connected". Report the link state separately from the fix state.
+    // Local GPS drives our own position, at UI rate rather than at whatever
+    // cadence the selected source polls. Deliberately gated on a source being
+    // armed: convoy_refresh() keys the waiting panel — the ONLY tap-through to
+    // the source picker — on !convoy_self_fix, so feeding a fix before the user
+    // has chosen a source would hide the picker and strand them. Auto-arm fires
+    // within ~700ms of entry, so in practice this costs nothing.
+    if (convoy_src_sel != CVS_NONE) gps_feed_convoy_self();
+
+    static const char * wait_shown = NULL;
+    const char * line = "Waiting for Mesh/Phone";
+    const char * cta  = "Tap to choose source";
+    // During the auto-arm stagger convoy_src_sel is still CVS_NONE, but we already
+    // know what is about to come up — treat it as the effective source so the panel
+    // doesn't flick back to "Waiting" for the first ~700ms of every entry.
+    cvs_source_t eff = (convoy_src_sel != CVS_NONE) ? convoy_src_sel : convoy_autoarm_sel;
+    if (convoy_radio_failed) {
+        line = "Radio unavailable";      cta = "Tap to retry";
+    } else if (eff == CVS_CLOUD && convoy_wifi_status() == CONVOY_WIFI_NO_NET) {
+        line = "No Wi-Fi saved";         cta = "Settings > Wi-Fi to add one";
+    } else if (eff == CVS_CLOUD && convoy_wifi_status() == CONVOY_WIFI_UNPAIRED) {
+        // Name the board so the user knows which entry to tap in the app's list.
+        // Once the pairing window closes the board is no longer listed, so say
+        // that rather than pointing at a Connect button that cannot find it.
+        if (convoy_wifi_pairing_open()) {
+            line = "Tap Connect in the app"; cta = convoy_wifi_device_name();
+        } else {
+            line = "Pairing closed";         cta = "Reopen Tracker to link";
+        }
+    } else if (eff == CVS_CLOUD) {
+        line = "Linked - waiting for cars"; cta = CONVOY_PHONE_URL;
+    } else if (eff == CVS_MESH && convoy_link_status() == CONVOY_LINK_ONLINE) {
+        line = "Mesh linked - no GPS fix"; cta = "T-Beam needs sky view";
+    } else if (eff == CVS_MESH) {
+        line = "Connecting to T-Beam";   cta = "Tap to change source";
+    } else if (eff == CVS_PHONE) {
+        line = "Connect via browser";    cta = CONVOY_PHONE_URL;
+    }
+    if (line != wait_shown) {            // only touch LVGL when the message changes
+        wait_shown = line;
+        convoy_set_wait_text(line, cta);
+    }
+    convoy_set_status(NULL);
+    convoy_refresh();
+    return;
+#else
+    // When the real T-Beam link is up, its task feeds convoy_set_*; just redraw.
+    if (convoy_link_status() == CONVOY_LINK_ONLINE) { convoy_refresh(); return; }
+    static float phase = 0; phase += 0.02f;
+    const double slat = 12.9716, slon = 77.5946;          // mock ~Bengaluru
+    convoy_set_self(slat, slon, true);
+    double hdg = 300.0 + phase * 6.0 + sinf(phase * 0.5f) * 35.0;   // slow weave
+    convoy_set_heading(hdg, true);
+    const double mlat = 111320.0, mlon = 111320.0 * cos(cv_d2r(slat));
+    struct { const char * n; float b0; float d; float s; uint32_t c; } defs[] = {
+        { "C2",  40,  650,  1.0f, 0x00E5FF }, { "C3", 155, 1250, -0.7f, 0x00E676 },
+        { "C4", 250,  320,  1.6f, 0xFFD54F }, { "C5", 310, 1900,  0.4f, 0xFF4081 },
+    };
+    for (int i = 0; i < 4; i++) {
+        float brg  = defs[i].b0 + phase * defs[i].s * 20.0f;
+        float dist = defs[i].d  + sinf(phase * 0.6f + i) * 120.0f;
+        double dN = dist * cos(cv_d2r(brg)), dE = dist * sin(cv_d2r(brg));
+        convoy_set_car(i, defs[i].n, slat + dN / mlat, slon + dE / mlon,
+                       lv_color_hex(defs[i].c), true, true);
+    }
+    convoy_refresh();
+#endif
+}
+
+extern "C" void convoy_open_screen() {
+    convoy_build_screen();
+    convoy_src_build_screen();
+    // Fresh entry: clear any loader state left behind by a previous visit that was
+    // exited mid-transition, else the busy flag would swallow every tap in here.
+    convoy_load_busy = false; convoy_pending_scr = NULL;
+    convoy_ready_scr = NULL;  convoy_apply_sel   = false;
+    convoy_settings_cb        = fw_open_picker;   // radar panel tap → source picker
+    convoy_src_on_scan        = fw_src_scan;
+    convoy_src_on_pick_device = fw_src_pick;
+    convoy_src_on_use_phone   = fw_src_phone;
+    convoy_src_on_use_cloud   = fw_src_cloud;
+    convoy_src_on_back        = fw_src_back;
+    convoy_src_load_fn        = convoy_load_clean;   // clean AMOLED loads for the picker
+    static lv_timer_t * ctmr = nullptr;
+    if (!ctmr) ctmr = lv_timer_create(convoy_mock_tick, 200, NULL);
+    static lv_timer_t * ptmr = nullptr;
+    if (!ptmr) ptmr = lv_timer_create(convoy_picker_tick, 250, NULL);
+    currentMode = MODE_UI;                 // treat as a normal UI screen
+
+    // Restore the last-used source; first-ever entry opens the picker.
+    Preferences p; p.begin("convoy", true);
+    int saved = p.getInt("source", 0);
+    String mac = p.getString("tbeam_mac", "");
+    p.end();
+    // AUTO-ARM ON ENTRY: apply the remembered source and bring the radio up straight
+    // away, so coming back from another screen reconnects without a tap.
+    //
+    // This was deliberately display-only before, because auto-arming rebooted the
+    // board (NimBLE init at ~21KB free → controller malloc fails → assert). Both
+    // causes are now fixed: NimBLEDevice::init()'s return is checked
+    // (convoy_ble_guard.h), and the WiFi handover waits for a real ack from the OBD
+    // worker instead of powering the radio down from under it. A bring-up failure
+    // now surfaces as "Radio unavailable / Tap to retry" instead of panicking.
+    //
+    // The radio can NOT simply stay up while you are elsewhere: BLE and WiFi cannot
+    // coexist on this build and the speedometer needs WiFi for OBD. So re-entry
+    // *reconnects* (~2-5s, dominated by the WiFi release) rather than resuming a
+    // still-live link. The source choice itself persists in NVS across reboots.
+    // STAGGERED: the screen load below happens first; convoy_autoarm_schedule() brings
+    // the radio up ~700ms later, once the transition has settled. We must NOT call
+    // convoy_load_when_ready() here either — the screen load below already puts the
+    // radar up, and two loaders would fight.
+    convoy_src_sel      = CVS_NONE;
+    convoy_role_ready   = false;
+    convoy_radio_failed = false;
+    if (saved == 3) {
+        convoy_set_wait_text("Joining Wi-Fi", "Hotspot on?");
+        convoy_autoarm_schedule(CVS_CLOUD);
+    } else if (saved == 2) {
+        convoy_set_wait_text("Connect via browser", CONVOY_PHONE_URL);
+        convoy_autoarm_schedule(CVS_PHONE);
+    } else if (saved == 1 && mac.length() >= 17) {
+        strncpy(convoy_sel_mac, mac.c_str(), sizeof(convoy_sel_mac) - 1);
+        convoy_sel_mac[sizeof(convoy_sel_mac) - 1] = 0;
+        convoy_set_wait_text("Connecting to T-Beam", "Tap to change source");
+        convoy_autoarm_schedule(CVS_MESH);
+    } else {
+        convoy_set_wait_text("No source selected", "Tap to choose");
+    }
+    convoy_set_self(0, 0, false);          // start on the waiting panel
+
+    // First-ever entry opens the picker; with a remembered source show the radar
+    // (its waiting panel taps through to the picker to connect).
+    if (saved == 1 || saved == 2 || saved == 3)
+        lv_scr_load_anim(convoy_screen, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
+    else
+        convoy_load_clean(convoy_src_screen);
+}

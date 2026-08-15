@@ -51,7 +51,20 @@ a room (the room code is the shared secret):
         "ts":       { ".validate": "newData.isNumber()" },
         "room":     { ".validate": "newData.isString() && newData.val().length <= 15" },
         "callsign": { ".validate": "newData.isString() && newData.val().length <= 11" },
+        "wssid":    { ".validate": "newData.isString() && newData.val().length <= 32" },
+        "wpass":    { ".validate": "newData.isString() && newData.val().length <= 64" },
         "$other":   { ".validate": false }
+      }
+    },
+    "photos": {
+      ".read": true,
+      ".write": true,
+      "files": {
+        "$i": {
+          "path": { ".validate": "newData.isString() && newData.val().length <= 64" },
+          "url":  { ".validate": "newData.isString() && newData.val().length <= 512" },
+          "$other": { ".validate": false }
+        }
       }
     },
     "assign": {
@@ -67,6 +80,22 @@ a room (the room code is the shared secret):
   }
 }
 ```
+
+`wssid`/`wpass` are the Wi-Fi tab's outbox. **They are a real exposure while they
+sit there:** there is no auth, so anyone who lists `devices` during that moment
+can read the password. The board deletes both keys in the same poll that saves
+them (`convoy_wifi_pair_tick`), which bounds the window to seconds rather than
+removing it. For a network you actually care about, provision over the board's
+own setup hotspot instead, where the password never leaves the room.
+
+### Images need Firebase Storage (separate one-time step)
+
+The Images tab converts a photo to raw RGB565 in the browser and uploads the
+`.bin` to **Storage**, then publishes `{path, url}` into `photos/files`, which is
+what `ota_sync_photos()` already reads. Storage is a different product from the
+Realtime Database and is **not** enabled by default: Firebase console → Build →
+Storage → Get started, then allow writes under `photos/`. Until that exists the
+tab reports the rejection rather than failing silently.
 
 **`devices` and `assign` are not optional.** Realtime Database rules are
 deny-by-default, so a rule set that only mentions `convoys` denies everything

@@ -1,0 +1,6 @@
+name = "trailmaster-relay"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# The shared secret is NOT set here — it would end up in git. Set it with:
+#   npx wrangler secret put RELAY_TOKEN

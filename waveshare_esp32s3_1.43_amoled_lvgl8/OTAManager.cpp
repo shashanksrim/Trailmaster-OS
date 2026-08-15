@@ -14,6 +14,12 @@
 // This URL points to docs/version.json on your GitHub Pages site.
 // Update this to match your actual GitHub username / repo name.
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/version.json"
+
+// Photo-frame manifest, written by the convoy web app. Same shape as the
+// version.json sd_files array: {"files":[{"path":"/photos/x.jpg","url":"..."}]}.
+// Kept in the Realtime Database rather than the repo so uploading photos does
+// not mean making a commit.
+#define OTA_PHOTO_MANIFEST_URL "https://trailmaster-e43b1-default-rtdb.asia-southeast1.firebasedatabase.app/photos.json"
 #define OTA_NVS_NS       "ota_wifi"
 #define OTA_MAX_NETWORKS 8
 #define OTA_WIFI_TIMEOUT_MS 15000
@@ -58,22 +64,23 @@ static int sd_load_networks(char ssids[][33], char passes[][65], int max_count) 
     return n;
 }
 
-static void sd_save_networks(char ssids[][33], char passes[][65], int count) {
+static bool sd_save_networks(char ssids[][33], char passes[][65], int count) {
     FILE* f = fopen(OTA_WIFI_FILE, "w");
-    if (!f) { Serial.println("[OTA] WARN: could not write wifi.txt to SD"); return; }
+    if (!f) { Serial.println("[OTA] WARN: could not write wifi.txt to SD"); return false; }
     for (int i = 0; i < count; i++) fprintf(f, "%s\t%s\n", ssids[i], passes[i]);
     fclose(f);
+    return true;
 }
 
-// One-time migration: if the SD file is absent but NVS holds networks, copy them
-// to SD so previously-saved credentials survive future flashes.
-static void migrate_nvs_to_sd() {
-    FILE* f = fopen(OTA_WIFI_FILE, "r");
-    if (f) { fclose(f); return; } // SD file already present — nothing to migrate
-    Preferences prefs; prefs.begin(OTA_NVS_NS, true);
-    char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
+// NVS was described as a "backup", but nothing ever read it back — every lookup
+// went to SD alone. So with no card (or an unmounted one) the saved credentials
+// were invisible to OTA, to the portal's network list, and to convoy, even
+// though they were sitting in NVS the whole time. This is that fallback.
+static int nvs_load_networks(char ssids[][33], char passes[][65], int max_count) {
+    Preferences prefs;
+    if (!prefs.begin(OTA_NVS_NS, true)) return 0;
     int n = 0;
-    for (int i = 0; i < OTA_MAX_NETWORKS; i++) {
+    for (int i = 0; i < OTA_MAX_NETWORKS && n < max_count; i++) {
         char ks[16], kp[16];
         snprintf(ks, sizeof(ks), "ssid_%d", i); snprintf(kp, sizeof(kp), "pass_%d", i);
         String s = prefs.getString(ks, ""); if (s == "") continue;
@@ -83,7 +90,56 @@ static void migrate_nvs_to_sd() {
         n++;
     }
     prefs.end();
-    if (n > 0) { sd_save_networks(ssids, passes, n); Serial.printf("[OTA] Migrated %d network(s) NVS->SD\n", n); }
+    return n;
+}
+
+// MERGE both stores, SD first, de-duplicated by SSID.
+//
+// This used to be "SD if non-empty, else NVS", and that shadowing cost a real
+// debugging session (2026-08-12): the SD file held ONE network whose password
+// had gone stale, NVS held a second network that worked, and because SD was
+// non-empty the working credential was never even tried. The board sat at
+// "no saved network reachable" with a perfectly good AP in range.
+//
+// The two stores exist for different failure modes — SD survives a reflash, NVS
+// survives a missing card — so neither is authoritative and picking one is
+// always wrong. Trying both is strictly better: a credential that ever worked
+// stays in the candidate pool, and the scan-ordered connect loop below only
+// costs time on the ones actually in range.
+static int load_networks(char ssids[][33], char passes[][65], int max_count) {
+    int n = sd_load_networks(ssids, passes, max_count);
+    const int from_sd = n;
+
+    char nssids[OTA_MAX_NETWORKS][33], npasses[OTA_MAX_NETWORKS][65];
+    int m = nvs_load_networks(nssids, npasses, OTA_MAX_NETWORKS);
+    int added = 0;
+    for (int i = 0; i < m && n < max_count; i++) {
+        bool dup = false;
+        for (int j = 0; j < from_sd; j++) if (strcmp(ssids[j], nssids[i]) == 0) { dup = true; break; }
+        if (dup) continue;
+        strncpy(ssids[n], nssids[i], 32);  ssids[n][32]  = '\0';
+        strncpy(passes[n], npasses[i], 64); passes[n][64] = '\0';
+        n++; added++;
+    }
+    Serial.printf("[OTA] credentials: %d from SD + %d new from NVS = %d candidate(s)\n",
+                  from_sd, added, n);
+    for (int i = 0; i < n; i++)
+        Serial.printf("[OTA]   [%d] '%s' (pass %d chars)\n", i, ssids[i], (int)strlen(passes[i]));
+    return n;
+}
+
+// One-time migration: if the SD file is absent but NVS holds networks, copy them
+// to SD so previously-saved credentials survive future flashes.
+static void migrate_nvs_to_sd() {
+    FILE* f = fopen(OTA_WIFI_FILE, "r");
+    if (f) { fclose(f); return; } // SD file already present — nothing to migrate
+    char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
+    int n = nvs_load_networks(ssids, passes, OTA_MAX_NETWORKS);
+    // Only claim success if the card actually took it. This used to log
+    // "Migrated N network(s)" even when sd_save_networks() had just warned that
+    // it could not write, which made a dead SD look like a working one.
+    if (n > 0 && sd_save_networks(ssids, passes, n))
+        Serial.printf("[OTA] Migrated %d network(s) NVS->SD\n", n);
 }
 
 // ── WiFi Network Storage ──────────────────────────────────────────────────────
@@ -99,7 +155,7 @@ void ota_add_network(const char* ssid, const char* password) {
 
     // --- SD (primary, survives reflash) ---
     char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
-    int n = sd_load_networks(ssids, passes, OTA_MAX_NETWORKS);
+    int n = load_networks(ssids, passes, OTA_MAX_NETWORKS);
     int slot = -1;
     for (int i = 0; i < n; i++) if (strcmp(ssids[i], ssid) == 0) { slot = i; break; }
     if (slot < 0 && n < OTA_MAX_NETWORKS) slot = n++;
@@ -132,7 +188,7 @@ void ota_remove_network(const char* ssid) {
 
     // --- SD ---
     char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
-    int n = sd_load_networks(ssids, passes, OTA_MAX_NETWORKS);
+    int n = load_networks(ssids, passes, OTA_MAX_NETWORKS);
     int w = 0;
     for (int i = 0; i < n; i++) {
         if (strcmp(ssids[i], ssid) != 0) {
@@ -159,10 +215,26 @@ void ota_remove_network(const char* ssid) {
     Serial.printf("[OTA] Removed network: %s\n", ssid);
 }
 
+// SSIDs *and* passwords, for the on-device "saved networks" page. Separate from
+// ota_list_networks() because that one is used where only names are wanted, and
+// handing passwords to callers that do not need them is how they end up in logs.
+int ota_list_networks_full(char ssids[][33], char passes[][65], int max_count) {
+    migrate_nvs_to_sd();
+    char all_ssids[OTA_MAX_NETWORKS][33]; char all_passes[OTA_MAX_NETWORKS][65];
+    int n = load_networks(all_ssids, all_passes, OTA_MAX_NETWORKS);
+    int count = 0;
+    for (int i = 0; i < n && count < max_count; i++) {
+        strncpy(ssids[count],  all_ssids[i],  32); ssids[count][32]  = '\0';
+        strncpy(passes[count], all_passes[i], 64); passes[count][64] = '\0';
+        count++;
+    }
+    return count;
+}
+
 int ota_list_networks(char ssids[][33], int max_count) {
     migrate_nvs_to_sd();
     char all_ssids[OTA_MAX_NETWORKS][33]; char all_passes[OTA_MAX_NETWORKS][65];
-    int n = sd_load_networks(all_ssids, all_passes, OTA_MAX_NETWORKS);
+    int n = load_networks(all_ssids, all_passes, OTA_MAX_NETWORKS);
     int count = 0;
     for (int i = 0; i < n && count < max_count; i++) {
         strncpy(ssids[count], all_ssids[i], 32);
@@ -173,8 +245,10 @@ int ota_list_networks(char ssids[][33], int max_count) {
 }
 
 // ── WiFi Connect ──────────────────────────────────────────────────────────────
-static bool connect_to_known_network() {
-    set_status(OTA_SCANNING_WIFI, 0, "Scanning for WiFi networks...");
+// report=false is the convoy caller: same radio sequence, but silent to the OTA
+// UI and without the diagnostic scan (2-4s, log-only).
+static bool wifi_connect_saved_core(bool report) {
+    if (report) set_status(OTA_SCANNING_WIFI, 0, "Scanning for WiFi networks...");
 
     // Shut down the AP entirely and use pure STA mode so the ESP32 can switch channels!
     // In dual AP+STA mode, the ESP32 forces the STA to match the AP's channel (Channel 1),
@@ -203,32 +277,66 @@ static bool connect_to_known_network() {
     WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
     delay(100);
 
-    // --- DIAGNOSTIC SCAN ---
-    Serial.println("[OTA] Executing deep diagnostic scan...");
-    int n = WiFi.scanNetworks(false, false);
-    if (n <= 0) {
-        Serial.println("[OTA] No networks found in diagnostic scan!");
-    } else {
-        for (int i = 0; i < n; i++) {
-            Serial.printf("[OTA] Scan saw: '%s' (RSSI: %d, Ch: %d)\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
-        }
-    }
-    // -----------------------
-
     migrate_nvs_to_sd();
     char ssids[OTA_MAX_NETWORKS][33]; char passes[OTA_MAX_NETWORKS][65];
-    int net_count = sd_load_networks(ssids, passes, OTA_MAX_NETWORKS);
+    int net_count = load_networks(ssids, passes, OTA_MAX_NETWORKS);
     bool found_any_saved = (net_count > 0);
-    Serial.println("[OTA] Attempting to connect to saved WiFi networks...");
 
-    // Try to connect to each saved network directly
-    for (int i = 0; i < net_count; i++) {
+    // --- Order the attempts by what is actually in range, strongest first ---
+    // Each unreachable network costs a full OTA_WIFI_TIMEOUT_MS (15s) of dead
+    // waiting, and on the road the home network is ALWAYS unreachable — convoy
+    // was spending 15s staring at it before reaching the phone hotspot. The scan
+    // costs a couple of seconds once and skips those timeouts entirely.
+    int order[OTA_MAX_NETWORKS];
+    int n_try = 0;
+    int rssi[OTA_MAX_NETWORKS];
+    const int n_scan = WiFi.scanNetworks(false, false);
+    // Dump the whole scan, always. "not seen" on its own cannot distinguish a
+    // typo'd SSID from a 5 GHz-only AP from a genuinely absent one, and this is
+    // the S3: it is 2.4 GHz only, so a dual-band router that a phone or laptop
+    // joins happily may be invisible here. Seeing the actual airspace is the
+    // difference between guessing and knowing.
+    Serial.printf("[OTA] scan sees %d AP(s):\n", n_scan);
+    for (int j = 0; j < n_scan; j++)
+        Serial.printf("[OTA]   '%s' %d dBm ch%d\n",
+                      WiFi.SSID(j).c_str(), (int)WiFi.RSSI(j), (int)WiFi.channel(j));
+    if (n_scan > 0) {
+        for (int i = 0; i < net_count; i++) {
+            rssi[i] = -1000;
+            for (int j = 0; j < n_scan; j++)
+                if (WiFi.SSID(j) == ssids[i] && WiFi.RSSI(j) > rssi[i]) rssi[i] = WiFi.RSSI(j);
+            Serial.printf("[OTA] saved '%s': %s\n", ssids[i],
+                          rssi[i] > -1000 ? "IN RANGE" : "not seen (2.4 GHz only on this chip)");
+        }
+        for (int i = 0; i < net_count; i++) if (rssi[i] > -1000) order[n_try++] = i;
+        for (int a = 1; a < n_try; a++) {          // insertion sort, strongest first
+            int k = order[a], b = a - 1;
+            while (b >= 0 && rssi[order[b]] < rssi[k]) { order[b + 1] = order[b]; b--; }
+            order[b + 1] = k;
+        }
+    }
+    if (n_try == 0) {
+        // Scan failed, or none of the saved networks showed up. Fall back to
+        // trying everything in stored order — a hidden SSID never appears in a
+        // scan, so "not seen" is not proof that it is unreachable.
+        Serial.printf("[OTA] Scan gave no usable order (scan=%d) — trying all %d saved\n",
+                      n_scan, net_count);
+        for (int i = 0; i < net_count; i++) order[n_try++] = i;
+    }
+    WiFi.scanDelete();
+
+    Serial.printf("[OTA] Attempting %d saved network(s), best signal first...\n", n_try);
+
+    for (int oi = 0; oi < n_try; oi++) {
+        const int i = order[oi];
         const char* saved_ssid = ssids[i];
         const char* saved_pass = passes[i];
 
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Connecting to %s...", saved_ssid);
-        set_status(OTA_CONNECTING_WIFI, 10, buf);
+        if (report) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Connecting to %s...", saved_ssid);
+            set_status(OTA_CONNECTING_WIFI, 10, buf);
+        }
 
         Serial.printf("[OTA] Trying network %d: '%s'\n", i, saved_ssid);
 
@@ -241,27 +349,46 @@ static bool connect_to_known_network() {
         }
 
         if (WiFi.status() == WL_CONNECTED) {
-            set_status(OTA_CHECKING_VERSION, 20, "WiFi connected, checking GitHub...");
+            if (report) set_status(OTA_CHECKING_VERSION, 20, "WiFi connected, checking GitHub...");
             Serial.printf("[OTA] Successfully connected to %s. IP: %s\n", saved_ssid, WiFi.localIP().toString().c_str());
             return true;
         }
 
-        Serial.printf("[OTA] Failed to connect to %s (Final Status: %d). Moving to next...\n", saved_ssid, WiFi.status());
+        // Name the failure. wl_status_t on its own sends you hunting through
+        // headers mid-debug, and the two common causes need different fixes:
+        // NO_SSID_AVAIL is "out of range / 5 GHz-only / hidden", while
+        // CONNECT_FAILED and DISCONNECTED after a full timeout are almost always
+        // a wrong password.
+        {
+            const int st = (int)WiFi.status();
+            const char *why =
+                st == WL_NO_SSID_AVAIL  ? "SSID not found (out of range, hidden, or 5 GHz-only — the S3 is 2.4 GHz only)" :
+                st == WL_CONNECT_FAILED ? "auth rejected — wrong password?" :
+                st == WL_DISCONNECTED   ? "no association within the timeout — usually a wrong password" :
+                                          "unknown";
+            Serial.printf("[OTA] FAILED '%s' (status %d: %s)\n", saved_ssid, st, why);
+        }
 
         // Failed to connect to this one — disconnect and try next
         WiFi.disconnect(false);
         delay(100);
     }
 
-    Serial.println("[OTA] Exhausted all saved networks. Connection failed.");
+    Serial.printf("[OTA] Exhausted all %d saved network(s) — still offline. "
+                  "Re-enter the password via the setup portal if the AP is in range.\n", n_try);
 
-    if (!found_any_saved) {
-        set_status(OTA_FAILED_NO_WIFI, 0, "Failed: No WiFi network found (Add via QR settings)");
-    } else {
-        set_status(OTA_FAILED_NO_WIFI, 0, "Failed: Could not connect to saved networks");
+    if (report) {
+        if (!found_any_saved) {
+            set_status(OTA_FAILED_NO_WIFI, 0, "Failed: No WiFi network found (Add via QR settings)");
+        } else {
+            set_status(OTA_FAILED_NO_WIFI, 0, "Failed: Could not connect to saved networks");
+        }
     }
     return false;
 }
+
+static bool connect_to_known_network() { return wifi_connect_saved_core(true);  }
+bool        ota_wifi_connect_saved()   { return wifi_connect_saved_core(false); }
 
 // ── Version Check ─────────────────────────────────────────────────────────────
 static bool fetch_version_info() {
@@ -372,23 +499,21 @@ static bool download_and_flash_firmware(const char* url) {
 }
 
 // ── SD Card File Updates ──────────────────────────────────────────────────────
-static void download_sd_files() {
-    // Re-fetch version.json to get the sd_files list
-    HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
-    http.begin(client, OTA_VERSION_URL);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    int code = http.GET();
-    if (code != 200) { http.end(); return; }
-
-    String payload = http.getString();
-    http.end();
-
-    // Simple manual parser for sd_files array:
-    // Looks for repeated {"path":"...","url":"..."} blocks
+// Download every {"path":..,"url":..} pair found under `key` onto the SD card,
+// skipping anything already present.
+//
+// Shared by two callers with the same shape and the same skip-if-present
+// behaviour: the OTA asset sync (`sd_files` in version.json) and photo sync
+// (`files` in the photo manifest). Photos used to require the phone to join the
+// board's access point and push them over the local network; pulling them from a
+// URL instead means photo setup can live at the same public URL as everything
+// else, and the captive portal is left doing only the Wi-Fi bootstrap that
+// genuinely cannot happen anywhere else.
+static void download_file_list(const String& payload, const char* key, const char* label) {
     const char* p = payload.c_str();
-    const char* sd_files_start = strstr(p, "\"sd_files\"");
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* sd_files_start = strstr(p, pat);
     if (!sd_files_start) return;
 
     int total_files = 0;
@@ -438,7 +563,7 @@ static void download_sd_files() {
         }
 
         char status_buf[96];
-        snprintf(status_buf, sizeof(status_buf), "Updating SD files %d/%d", done + 1, total_files);
+        snprintf(status_buf, sizeof(status_buf), "%s %d/%d", label, done + 1, total_files);
         set_status(OTA_DOWNLOADING_SD, (done * 100) / total_files, status_buf);
 
         HTTPClient fhttp;
@@ -474,12 +599,54 @@ static void download_sd_files() {
                     delay(1);
                 }
                 fclose(fp);
-                Serial.printf("[OTA] SD file updated: %s\n", sd_path);
+                Serial.printf("[OTA] %s: wrote %s\n", label, sd_path);
             }
         }
         fhttp.end();
         done++;
     }
+}
+
+static void download_sd_files() {
+    // Re-fetch version.json to get the sd_files list
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    http.begin(client, OTA_VERSION_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = http.GET();
+    if (code != 200) { http.end(); return; }
+    String payload = http.getString();
+    http.end();
+    download_file_list(payload, "sd_files", "Updating SD files");
+}
+
+// Pull photo-frame images from the manifest the web app publishes.
+//
+// Deliberately runs on the OTA connection path rather than acquiring the radio
+// itself: that path already picks the strongest saved network, which at home is
+// home Wi-Fi. Syncing over the phone's hotspot would push every photo up to the
+// cloud and straight back down through the same cellular link — paying for the
+// bytes twice — so preferring the network the board is already best connected to
+// is the whole point.
+void ota_sync_photos() {
+    if (WiFi.status() != WL_CONNECTED && !ota_wifi_connect_saved()) {
+        Serial.println("[OTA] photo sync: no network");
+        return;
+    }
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    http.begin(client, OTA_PHOTO_MANIFEST_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = http.GET();
+    if (code != 200) { Serial.printf("[OTA] photo manifest -> %d\n", code); http.end(); return; }
+    String payload = http.getString();
+    http.end();
+    // An empty manifest reads as the literal "null" from the Realtime Database.
+    if (payload.length() < 4) { Serial.println("[OTA] photo manifest empty"); return; }
+    download_file_list(payload, "files", "Syncing photos");
+    set_status(OTA_IDLE, 0, "Photos up to date");
 }
 
 // ── Background Task ───────────────────────────────────────────────────────────

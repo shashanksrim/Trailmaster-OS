@@ -219,9 +219,28 @@ bool Amoled::pushToPanel(int x, int y, const uint16_t *buf, int w, int h)
 {
   const int x1 = (controller_id == SH8601_ID) ? x : x + 0x06;
   const int x2 = (controller_id == SH8601_ID) ? x + w : x + w + 0x06;
-  const int y1 = y;
-  const int y2 = y + h; // end-exclusive
-  return esp_lcd_panel_draw_bitmap(panel_handle, x1, y1, x2, y2, buf) == ESP_OK;
+
+  // Split into row bands that fit the SPI bus limit. Sending the whole area in one
+  // shot is what broke full-screen redraws: a 466x466 frame is 434,312 bytes against
+  // a max_transfer_sz of TRANSFER_SIZE (4092), and the driver answered ESP_ERR_NO_MEM
+  // because it cannot build a DMA descriptor chain that long for a PSRAM source. The
+  // flush was then dropped and the panel silently kept the previous frame — which is
+  // what the "garble" actually was. The odd-size path below has always chunked (2 rows
+  // at a time) and has always worked; this is the same idea, just with bands as large
+  // as the bus allows. Bands stay even-numbered because the panel addresses row pairs.
+  const int bytes_per_row = w * 2;
+  int rows_per_band = (bytes_per_row > 0) ? (TRANSFER_SIZE / bytes_per_row) & ~1 : 0;
+  if (rows_per_band < 2)
+    rows_per_band = 2;
+
+  for (int row = 0; row < h; row += rows_per_band)
+  {
+    int rows = (h - row < rows_per_band) ? (h - row) : rows_per_band;
+    if (esp_lcd_panel_draw_bitmap(panel_handle, x1, y + row, x2, y + row + rows,
+                                  buf + (size_t)row * w) != ESP_OK)
+      return false;
+  }
+  return true;
 }
 
 bool Amoled::invertColor(bool invertColor)

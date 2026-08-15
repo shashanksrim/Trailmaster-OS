@@ -10,6 +10,9 @@ import {
   getDatabase, ref, set, remove, update, onValue, get,
   onChildAdded, onChildChanged, onChildRemoved,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+import {
+  getStorage, ref as sref, uploadBytes, getDownloadURL,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS,
          RELAY_URL, RELAY_TOKEN } from "./config.js";
 
@@ -116,6 +119,15 @@ function boot() {
     e.preventDefault();
     $("tr-manual-box").classList.toggle("hidden");
   });
+
+  document.querySelectorAll("#tabs .tab")
+          .forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+  wireWifiTab();
+  wireImageTab();
+  // #wifi / #img open a tab directly, so the QR on the board could point at a
+  // specific one later, and so a link in a message lands where it means to.
+  const want = location.hash.replace("#", "");
+  if (["wifi", "img"].includes(want)) setTimeout(() => showTab(want), 0);
 
   if (new URLSearchParams(location.search).has("demo")) { startDemo(); return; }
 
@@ -777,6 +789,208 @@ function err(msg) { $("f-err").textContent = msg; }
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+// The map is a live Leaflet instance sized to its container, so panels overlay
+// it rather than replacing it — coming back to Convoy must not re-init the map
+// or re-fit the view.
+let tab = "convoy";
+
+function showTab(which) {
+  tab = which;
+  $("p-wifi").classList.toggle("hidden", which !== "wifi");
+  $("p-img").classList.toggle("hidden",  which !== "img");
+  // Convoy's own furniture would otherwise float above a panel.
+  for (const id of ["sheet", "fabs", "hdg-btn"]) {
+    const el = $(id);
+    if (el) el.style.visibility = which === "convoy" ? "" : "hidden";
+  }
+  document.querySelectorAll("#tabs .tab")
+          .forEach((b) => b.classList.toggle("active", b.dataset.tab === which));
+  if (which === "wifi") refreshBoardNote();
+  if (which === "img")  refreshPhotoList();
+}
+
+// ── Board lookup, shared by the Wi-Fi and Images tabs ────────────────────────
+// Both write into the board's own node, so both need to know which board is
+// yours. A board only lists itself while its pairing window is open, so this is
+// re-read each time a tab opens rather than cached.
+async function freshBoards() {
+  if (!db) return [];
+  let snap;
+  try { snap = await get(ref(db, "devices")); } catch { return []; }
+  return Object.entries(snap.val() || {})
+    .filter(([, d]) => d && d.ts && (now() - d.ts) < BOARD_FRESH_MS);
+}
+
+async function refreshBoardNote() {
+  const note = $("wifi-board");
+  const boards = await freshBoards();
+  if (!boards.length) {
+    note.innerHTML = "<b>No board is listening.</b> Open the Tracker screen on " +
+                     "the Trailmaster — it only accepts settings while that is up.";
+    return;
+  }
+  note.innerHTML = "Sending to <b>" + boards.map(([, d]) => d.name || "Trailmaster").join(", ") + "</b>";
+}
+
+function wireWifiTab() {
+  $("w-send").addEventListener("click", async () => {
+    const ssid = $("w-ssid").value.trim();
+    const pass = $("w-pass").value;
+    const errEl = $("w-err");
+    errEl.style.color = "";
+    if (!ssid) { errEl.textContent = "Enter a network name."; return; }
+    if (ssid.length > 32 || pass.length > 64) { errEl.textContent = "Too long for the board."; return; }
+
+    const boards = await freshBoards();
+    if (!boards.length) { errEl.textContent = "No board is listening right now."; return; }
+
+    errEl.textContent = "Sending…";
+    try {
+      // Flat keys, not a nested object: the database rules validate per field
+      // and reject anything they do not name, so a nested shape would need a
+      // rules change of its own for no benefit.
+      await Promise.all(boards.map(([id]) =>
+        update(ref(db, `devices/${id}`), { wssid: ssid, wpass: pass })));
+      errEl.style.color = "#7ee08a";
+      errEl.textContent = "Sent. The board saves it within a few seconds, then erases it here.";
+      $("w-ssid").value = ""; $("w-pass").value = "";
+    } catch (e) {
+      errEl.textContent = "Rejected by the database — check the rules include wssid/wpass.";
+      console.warn(e);
+    }
+  });
+}
+
+// ── Images ────────────────────────────────────────────────────────────────────
+// The board has no image decoder: it downloads whatever photos.json points at
+// straight onto the SD card and blits it. So the browser does the work — crop to
+// the round 466 px screen, then convert to raw little-endian RGB565.
+const IMG_DIM = 466;
+let imgEl = null, imgScale = 1, imgMinScale = 1, imgOffX = 0, imgOffY = 0;
+
+function drawCrop() {
+  const cv = $("i-canvas"), ctx = cv.getContext("2d");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, IMG_DIM, IMG_DIM);
+  if (!imgEl) return;
+  const w = imgEl.width * imgScale, h = imgEl.height * imgScale;
+  imgOffX = Math.min(0, Math.max(IMG_DIM - w, imgOffX));
+  imgOffY = Math.min(0, Math.max(IMG_DIM - h, imgOffY));
+  ctx.drawImage(imgEl, imgOffX, imgOffY, w, h);
+}
+
+function toRGB565(ctx) {
+  const px = ctx.getImageData(0, 0, IMG_DIM, IMG_DIM).data;
+  const out = new Uint8Array(IMG_DIM * IMG_DIM * 2);
+  for (let i = 0, o = 0; i < px.length; i += 4) {
+    const v = ((px[i] & 0xf8) << 8) | ((px[i + 1] & 0xfc) << 3) | (px[i + 2] >> 3);
+    out[o++] = v & 0xff;           // little-endian, matching convert_to_bin.py
+    out[o++] = (v >> 8) & 0xff;
+  }
+  return out;
+}
+
+function wireImageTab() {
+  $("i-file").addEventListener("change", (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const im = new Image();
+    im.onload = () => {
+      imgEl = im;
+      imgMinScale = Math.max(IMG_DIM / im.width, IMG_DIM / im.height);
+      imgScale = imgMinScale;
+      imgOffX = (IMG_DIM - im.width * imgScale) / 2;
+      imgOffY = (IMG_DIM - im.height * imgScale) / 2;
+      const z = $("i-zoom");
+      z.min = imgMinScale; z.max = imgMinScale * 3; z.step = 0.01; z.value = imgScale;
+      $("i-zoomrow").classList.remove("hidden");
+      $("i-send").disabled = false;
+      drawCrop();
+    };
+    im.src = URL.createObjectURL(f);
+  });
+
+  $("i-zoom").addEventListener("input", (e) => {
+    const cx = IMG_DIM / 2, prev = imgScale;
+    imgScale = parseFloat(e.target.value);
+    // Zoom about the centre, so the framing the user set does not drift.
+    imgOffX = cx - ((cx - imgOffX) / prev) * imgScale;
+    imgOffY = cx - ((cx - imgOffY) / prev) * imgScale;
+    drawCrop();
+  });
+
+  let drag = null;
+  const cv = $("i-canvas");
+  cv.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const k = IMG_DIM / cv.clientWidth;              // canvas is displayed smaller
+    imgOffX += (e.clientX - drag.x) * k;
+    imgOffY += (e.clientY - drag.y) * k;
+    drag = { x: e.clientX, y: e.clientY };
+    drawCrop();
+  });
+  cv.addEventListener("pointerup",     () => { drag = null; });
+  cv.addEventListener("pointercancel", () => { drag = null; });
+
+  $("i-send").addEventListener("click", uploadImage);
+}
+
+async function uploadImage() {
+  const errEl = $("i-err");
+  errEl.style.color = "";
+  if (!imgEl || !db) return;
+
+  const name = `tm_${Date.now().toString(36)}.bin`;
+  errEl.textContent = "Converting…";
+  const bytes = toRGB565($("i-canvas").getContext("2d"));
+
+  try {
+    errEl.textContent = "Uploading…";
+    const storage = getStorage();
+    const dest = sref(storage, `photos/${name}`);
+    await uploadBytes(dest, bytes, { contentType: "application/octet-stream" });
+    const url = await getDownloadURL(dest);
+
+    // The board reads this list on its own schedule (ota_sync_photos) and
+    // downloads anything it does not already have, so publishing the entry IS
+    // the handoff — nothing has to be pushed to the board directly.
+    const snap = await get(ref(db, "photos/files"));
+    const files = Array.isArray(snap.val()) ? snap.val() : [];
+    files.push({ path: name, url });
+    await set(ref(db, "photos/files"), files);
+
+    errEl.style.color = "#7ee08a";
+    errEl.textContent = "Uploaded. The board fetches it next time it syncs.";
+    $("i-send").disabled = true;
+    refreshPhotoList();
+  } catch (e) {
+    // Storage is a separate Firebase product and is not enabled by default;
+    // say so plainly rather than reporting a generic failure.
+    const msg = String(e && e.code || e);
+    errEl.textContent = msg.includes("storage/unauthorized") || msg.includes("storage/unknown")
+      ? "Firebase Storage rejected this — enable Storage and allow writes to photos/."
+      : "Upload failed: " + msg;
+    console.warn(e);
+  }
+}
+
+async function refreshPhotoList() {
+  const box = $("i-list");
+  if (!db) { box.textContent = "—"; return; }
+  let snap;
+  try { snap = await get(ref(db, "photos/files")); } catch { box.textContent = "Couldn't read."; return; }
+  const files = Array.isArray(snap.val()) ? snap.val() : [];
+  box.textContent = "";
+  if (!files.length) { box.textContent = "Nothing published yet."; return; }
+  for (const f of files) {
+    const d = document.createElement("div");
+    d.className = "it";
+    d.textContent = f.path || "?";
+    box.appendChild(d);
+  }
 }
 
 boot();
