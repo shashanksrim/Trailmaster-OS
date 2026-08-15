@@ -53,6 +53,11 @@ void ota_sync_photos_async();
 // Set true when a sync actually brought files down; the photo frame clears it
 // after rescanning. Not a count: the frame only needs "something changed".
 extern volatile bool ota_photos_changed;
+// True while a sync is running. The photo frame shows a small status toast from
+// this plus ota_get_status()->status_text, so "nothing happened" is never a
+// silent outcome — the sync involves a Wi-Fi join and downloads that can take
+// tens of seconds with no other sign on screen.
+extern volatile bool ota_photos_busy;
 
 // Starts check+install flow on a background FreeRTOS task.
 // If an update is found, state becomes OTA_UPDATE_AVAILABLE.

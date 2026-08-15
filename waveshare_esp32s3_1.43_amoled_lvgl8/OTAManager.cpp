@@ -8,7 +8,8 @@
 #include "sd_card_bsp.h"
 #include <esp_wifi.h>
 #include "ota_logic.h"   // version_is_newer(), json_get_str() — also unit-tested on host
-#include <sys/stat.h>    // mkdir() for creating SD subdirectories during sd_files sync
+#include <sys/stat.h>
+#include <errno.h>    // mkdir() for creating SD subdirectories during sd_files sync
 
 // ── Config ────────────────────────────────────────────────────────────────────
 // This URL points to docs/version.json on your GitHub Pages site.
@@ -530,20 +531,20 @@ static String sd_full_path(const char* sd_path) {
     return String(SD_MOUNT_POINT) + p;
 }
 
-static void download_file_list(const String& payload, const char* key, const char* label) {
+static int download_file_list(const String& payload, const char* key, const char* label) {
     const char* p = payload.c_str();
     char pat[32];
     snprintf(pat, sizeof(pat), "\"%s\"", key);
     const char* sd_files_start = strstr(p, pat);
-    if (!sd_files_start) return;
+    if (!sd_files_start) return 0;
 
     int total_files = 0;
     // Count entries by counting occurrences of "path":" inside sd_files section
     const char* cnt = sd_files_start;
     while ((cnt = strstr(cnt, "\"path\":")) != NULL) { total_files++; cnt++; }
-    if (total_files == 0) return;
+    if (total_files == 0) return 0;
 
-    int done = 0;
+    int done = 0, failed = 0;
     const char* cursor = sd_files_start;
     while (true) {
         // Find next path+url pair
@@ -595,6 +596,7 @@ static void download_file_list(const String& payload, const char* key, const cha
         int fcode = fhttp.GET();
         if (fcode == 200) {
             String full_path = sd_full_path(sd_path);
+            Serial.printf("[OTA]   '%s' -> %s\n", sd_path, full_path.c_str());
             // Create any intermediate directories (fopen won't make them)
             {
                 char tmp[160];
@@ -620,12 +622,22 @@ static void download_file_list(const String& payload, const char* key, const cha
                     delay(1);
                 }
                 fclose(fp);
-                Serial.printf("[OTA] %s: wrote %s\n", label, sd_path);
+                Serial.printf("[OTA] %s: wrote %s (%d bytes)\n", label, sd_path, fwritten);
+            } else {
+                // Silent before, which is how a whole sync could report success
+                // while writing nothing: the only clue was an empty frame.
+                Serial.printf("[OTA] %s: CANNOT OPEN %s (errno %d)\n",
+                              label, full_path.c_str(), errno);
+                failed++;
             }
+        } else {
+            Serial.printf("[OTA] %s: GET %s -> %d\n", label, dl_url, fcode);
+            failed++;
         }
         fhttp.end();
         done++;
     }
+    return failed ? -1 : done;
 }
 
 static void download_sd_files() {
@@ -651,10 +663,17 @@ static void download_sd_files() {
 // bytes twice — so preferring the network the board is already best connected to
 // is the whole point.
 void ota_sync_photos() {
-    if (WiFi.status() != WL_CONNECTED && !ota_wifi_connect_saved()) {
-        Serial.println("[OTA] photo sync: no network");
-        return;
+    ota_photos_busy = true;
+    if (WiFi.status() != WL_CONNECTED) {
+        set_status(OTA_CONNECTING_WIFI, 0, "Connecting to Wi-Fi...");
+        if (!ota_wifi_connect_saved()) {
+            set_status(OTA_IDLE, 0, "No Wi-Fi in range");
+            Serial.println("[OTA] photo sync: no network");
+            ota_photos_busy = false;
+            return;
+        }
     }
+    set_status(OTA_CONNECTING_WIFI, 0, "Checking for images...");
     // Ask only for THIS board's images. The id is the eFuse MAC, derived
     // identically to convoy_wifi.h's devices/<id>, which is how the app knows
     // what to upload under. Without the scope every Trailmaster on a trip would
@@ -664,19 +683,48 @@ void ota_sync_photos() {
     snprintf(manifest_url, sizeof(manifest_url), "%s?dev=%04X%08X",
              OTA_PHOTO_MANIFEST_URL, (uint16_t)(mac >> 32), (uint32_t)mac);
 
-    HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
-    http.begin(client, manifest_url);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    int code = http.GET();
-    if (code != 200) { Serial.printf("[OTA] photo manifest -> %d\n", code); http.end(); return; }
-    String payload = http.getString();
-    http.end();
+    // SCOPED so the TLS client is DESTROYED before any file download starts.
+    //
+    // Each WiFiClientSecure holds ~40 KB of handshake buffers in internal RAM,
+    // and download_file_list opens its own. Keeping this one alive meant two at
+    // once, which the heap cannot take: the manifest fetch succeeded and every
+    // file GET to the same host then failed with -1, while the sync still
+    // reported "up to date". http.end() is not enough — it closes the request,
+    // not the client's buffers.
+    String payload;
+    {
+        HTTPClient http;
+        WiFiClientSecure client;
+        client.setInsecure();
+        http.begin(client, manifest_url);
+        http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+        int code = http.GET();
+        if (code != 200) {
+            Serial.printf("[OTA] photo manifest -> %d\n", code);
+            set_status(OTA_IDLE, 0, "Could not reach the image store");
+            http.end(); ota_photos_busy = false; return;
+        }
+        payload = http.getString();
+        http.end();
+        client.stop();
+    }
+    Serial.printf("[OTA] internal RAM before downloads: %u\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     // An empty manifest reads as the literal "null" from the Realtime Database.
-    if (payload.length() < 4) { Serial.println("[OTA] photo manifest empty"); return; }
-    download_file_list(payload, "files", "Syncing photos");
-    set_status(OTA_IDLE, 0, "Photos up to date");
+    if (payload.length() < 4) {
+        Serial.println("[OTA] photo manifest empty");
+        set_status(OTA_IDLE, 0, "No images in the app yet");
+        ota_photos_busy = false; return;
+    }
+    Serial.printf("[OTA] photo manifest: %s\n", payload.c_str());
+    const int got = download_file_list(payload, "files", "Syncing images");
+    // Report what actually happened. "Up to date" after two failed downloads is
+    // how this hid for three rounds of debugging.
+    char done_msg[64];
+    if (got < 0) snprintf(done_msg, sizeof(done_msg), "Some images failed to download");
+    else         snprintf(done_msg, sizeof(done_msg), "Images up to date");
+    set_status(OTA_IDLE, 0, done_msg);
+    ota_photos_busy = false;
 }
 
 // Run the photo sync off the UI thread. It makes HTTPS requests and writes
@@ -687,6 +735,7 @@ void ota_sync_photos() {
 // machine and announces itself through the OTA overlay, which would make a photo
 // sync look like a pending firmware update.
 static TaskHandle_t s_photo_task = NULL;
+volatile bool ota_photos_busy = false;   // a sync is running; the frame shows a toast
 volatile bool ota_photos_changed = false;   // set when new files landed; UI clears it
 
 static void ota_photo_task(void *) {

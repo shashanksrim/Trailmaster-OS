@@ -1218,6 +1218,8 @@ void scan_images() {
     }
     closedir(dir);
     std::sort(image_files.begin(), image_files.end());
+    Serial.printf("[PF] scan: %d image(s) in %s\n", (int)image_files.size(), SD_ROOT);
+    for (const auto &f : image_files) Serial.printf("[PF]   %s\n", f.c_str());
 }
 
 static void pf_load_page_immediately(int page_idx, bool load_neighbors) {
@@ -1601,7 +1603,68 @@ void stop_photoframe_wifi() {
     wifi_ap_running = false;
 }
 
+// A small toast across the top of the frame while images are syncing.
+//
+// The sync joins Wi-Fi and downloads over tens of seconds with nothing else on
+// screen, so without this "tapped it and nothing happened" is indistinguishable
+// from a real failure — which is exactly how the last two bugs here presented.
+// It reports the stage rather than a spinner, so a stall is attributable: no
+// Wi-Fi in range, cannot reach the store, or downloading n of m.
+static lv_obj_t * pf_sync_toast = NULL;
+static uint32_t   pf_toast_hide_at = 0;
+
+static void pf_toast_show(const char * text) {
+    if (!pf_sync_toast) {
+        pf_sync_toast = lv_obj_create(lv_scr_act());
+        lv_obj_remove_style_all(pf_sync_toast);
+        lv_obj_set_size(pf_sync_toast, 300, 46);
+        lv_obj_align(pf_sync_toast, LV_ALIGN_TOP_MID, 0, 44);
+        lv_obj_set_style_bg_color(pf_sync_toast, lv_color_hex(0x101418), 0);
+        lv_obj_set_style_bg_opa(pf_sync_toast, 235, 0);
+        lv_obj_set_style_radius(pf_sync_toast, 23, 0);
+        lv_obj_set_style_border_width(pf_sync_toast, 1, 0);
+        lv_obj_set_style_border_color(pf_sync_toast, lv_color_hex(0xFF6A00), 0);
+        lv_obj_clear_flag(pf_sync_toast, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t * l = lv_label_create(pf_sync_toast);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(l, 276);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(0xE8EEF2), 0);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(l);
+    }
+    lv_obj_t * l = lv_obj_get_child(pf_sync_toast, 0);
+    if (l && strcmp(lv_label_get_text(l), text) != 0) lv_label_set_text(l, text);
+    lv_obj_move_foreground(pf_sync_toast);
+}
+
+static void pf_toast_hide(void) {
+    if (!pf_sync_toast) return;
+    if (lv_obj_is_valid(pf_sync_toast)) lv_obj_del(pf_sync_toast);
+    pf_sync_toast = NULL;
+}
+
+static void pf_sync_toast_tick(void) {
+    const OTAStatus * st = ota_get_status();
+    if (ota_photos_busy) {
+        pf_toast_show(st ? st->status_text : "Syncing images...");
+        pf_toast_hide_at = 0;
+        return;
+    }
+    // Hold the final line briefly so the outcome is readable, then clear.
+    if (pf_sync_toast && !pf_toast_hide_at) {
+        pf_toast_show(st ? st->status_text : "Done");
+        pf_toast_hide_at = millis() + 3500;
+    }
+    if (pf_toast_hide_at && (int32_t)(millis() - pf_toast_hide_at) >= 0) {
+        pf_toast_hide_at = 0;
+        pf_toast_hide();
+    }
+}
+
 void photoframe_loop_handler() {
+    pf_sync_toast_tick();
+
     // A cloud sync lands files on the SD card from another task, so the frame
     // has to be told to look again. Routed through the same flag the AP upload
     // path sets, so both arrivals rebuild the carousel identically.
