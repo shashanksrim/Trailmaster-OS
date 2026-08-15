@@ -257,6 +257,27 @@ static void convoy_wifi_publish(void) {
     }
 }
 
+
+// Publish the code -> device mapping the app resolves when someone types the six
+// characters shown on this board's settings screen.
+//
+// NOT bounded by the pairing window, unlike devices/<id>. That window exists so
+// an idle board cannot be silently re-pointed by a stranger who spotted it in a
+// public list — but there is no list here. This node is keyed BY THE CODE, so
+// reaching it means already knowing the code, and the rules refuse to enumerate
+// the collection. Making it expire would only mean pairing failed whenever the
+// user had not opened the Tracker in the last three minutes, which is most of
+// the time.
+static void cvw_publish_pair(void) {
+    char url[224], body[200];
+    snprintf(url, sizeof(url), "%s/pair/%s.json", CONVOY_WIFI_DB_HOST, pair_code_get());
+    snprintf(body, sizeof(body), "{\"dev\":\"%s\",\"name\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
+             s_cvw_dev_id, s_cvw_dev_name);
+    const bool ok = cvw_request(url, "PATCH", body, nullptr);
+    Serial.printf("[PAIR] code %s -> %s : %s\n", pair_code_get(), s_cvw_dev_id,
+                  ok ? "published" : "FAILED (rules published?)");
+}
+
 // ── Pairing: announce this board, and pick up a room the app assigned ────────
 // The board publishes devices/<id> so the convoy web app can list it; the user
 // taps their board and the app writes room+callsign back into the same node.
@@ -290,20 +311,6 @@ static void convoy_wifi_pair_tick(void) {
                  "{\"name\":\"%s\",\"callsign\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
                  s_cvw_dev_name, s_cvw_call[0] ? s_cvw_call : "TM");
         if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
-    }
-
-    // Publish the code -> device mapping the app resolves when someone types the
-    // six characters shown on this board's settings screen. Written under the
-    // CODE, not the device id, which is the whole point: you cannot look up a
-    // board without already knowing its code, and the code is only ever on its
-    // own screen. Rules keep the pair collection itself unlistable, so there is
-    // nothing to enumerate — only ~887 million exact guesses.
-    {
-        char url[224], body[200];
-        snprintf(url, sizeof(url), "%s/pair/%s.json", CONVOY_WIFI_DB_HOST, pair_code_get());
-        snprintf(body, sizeof(body), "{\"dev\":\"%s\",\"name\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
-                 s_cvw_dev_id, s_cvw_dev_name);
-        cvw_request(url, "PATCH", body, nullptr);
     }
 
     // Wi-Fi handed down from the app's Wi-Fi tab. Consumed and DELETED in the
@@ -408,6 +415,11 @@ static bool convoy_wifi_begin(void) {
              CONVOY_WIFI_DB_HOST, s_cvw_dev_id);
     s_cvw_client.setInsecure();          // same posture as the OTA client
     s_cvw_http.setReuse(true);
+
+    // Do this first and unconditionally: a phone cannot pair with a board whose
+    // code has never reached the database, and that is the one step the user
+    // cannot see failing from the app end.
+    cvw_publish_pair();
     s_cvw_http.setTimeout(8000);
     s_cvw_begun = true;                  // cvw_request() owns begin()/end() now
     s_cvw_announced  = false;

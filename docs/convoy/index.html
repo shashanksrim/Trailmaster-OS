@@ -25,7 +25,11 @@
 
     /* ── Join screen ─────────────────────────────────────────── */
     .screen { height:100dvh; }
-    #join { display:flex; flex-direction:column; align-items:center; padding:24px;
+    /* Bottom padding clears the tab bar, which is now a sibling of this screen
+       rather than living inside the map — it has to be reachable before a convoy
+       is joined, since pairing a board has nothing to do with being in one. */
+    #join { display:flex; flex-direction:column; align-items:center;
+      padding:24px 24px calc(24px + var(--tabbar) + env(safe-area-inset-bottom));
       overflow:auto; }
     .brand { text-align:center; margin:32px 0 8px; }
     .brand h1 { margin:0; font-size:26px; letter-spacing:3px; text-transform:uppercase; }
@@ -310,6 +314,20 @@
          Credentials reach the board through devices/<id>, the same mailbox the
          board already polls for room and callsign. It is the only channel that
          works once the board's hotspot is gone. -->
+    
+
+    
+
+
+    <!-- ── Images panel ─────────────────────────────────────────────────────
+         The board reads photos.json and downloads each url into SD. It wants
+         RAW RGB565, 466x466, so the conversion happens here, on canvas, before
+         upload — the board has no image decoder. -->
+    
+
+    
+  </section>
+
     <section class="panel hidden" id="p-lock">
       <div class="panel-in">
         <h2>Pair your Trailmaster</h2>
@@ -370,13 +388,6 @@
       </div>
     </section>
 
-
-    <!-- ── Images panel ─────────────────────────────────────────────────────
-         The board reads photos.json and downloads each url into SD. It wants
-         RAW RGB565, 466x466, so the conversion happens here, on canvas, before
-         upload — the board has no image decoder. -->
-    
-
     <nav class="tabs" id="tabs">
       <button class="tab active" data-tab="convoy">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -391,7 +402,6 @@
         <span>My Trailmaster</span>
       </button>
     </nav>
-  </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
