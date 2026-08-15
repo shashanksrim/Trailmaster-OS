@@ -77,7 +77,7 @@ a room (the room code is the shared secret):
       "$callsign": {
         ".read": true,
         ".write": true,
-        ".validate": "$callsign.length <= 5",
+        ".validate": "$callsign.length <= 7",
         "room": {
           ".validate": "newData.isString() && newData.val().length <= 15"
         },

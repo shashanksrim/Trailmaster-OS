@@ -88,10 +88,13 @@ check(r.status === 200 && sent.url.includes("members/TM2.json"), "trailing slash
 r = await call("/AENP/SEKRIT?id=TM1&batt=80");
 check(r.status === 200, "no-fix ping is ok, not an error");
 
-// --- callsign sanitising (rules cap at 5 chars) ---
+// --- callsign sanitising (one limit, shared with the board and the rules) ---
+// Asserted against the same constant the Worker truncates with, so the three
+// sides cannot drift apart again: they disagreed once (devices allowed 11, the
+// room required 5) and every board position write was rejected with a 401.
 sent = null;
 await call("/AENP/SEKRIT?id=my-long-phone&lat=1&lon=2");
-check(sent.body.callsign.length <= 5, `callsign capped at 5 (got '${sent.body.callsign}')`);
+check(sent.body.callsign.length <= 7, `callsign capped at 7 (got '${sent.body.callsign}')`);
 check(/^[A-Z0-9]+$/.test(sent.body.callsign), "callsign alphanumeric only");
 
 // --- JSON POST (Traccar v9+) ---

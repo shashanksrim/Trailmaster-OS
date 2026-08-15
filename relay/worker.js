@@ -25,6 +25,11 @@
 // REVERTING: delete this Worker and stop using the URL. Nothing else in the
 // project depends on it.
 
+// Keep in sync with convoy_cfg.h, the app's CALLSIGN_MAX and the database
+// rules. Truncating to a different length here would write a member the room
+// rules then reject, or an assign key the app never looks under.
+const CALLSIGN_MAX = 7;
+
 const DB = "https://trailmaster-e43b1-default-rtdb.asia-southeast1.firebasedatabase.app";
 
 // Mirrors convoy_ui.h / convoy_wifi.h / the web app, so a car is the same
@@ -379,7 +384,7 @@ export default {
     }
 
     // The published RTDB rules require callsign + ts and cap callsign at 5.
-    const callsign = String(f.id).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+    const callsign = String(f.id).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, CALLSIGN_MAX);
     if (!callsign) return new Response("bad device id\n", { status: 400 });
 
     // Resolve the room: pinned in the URL, else whatever the web app last
