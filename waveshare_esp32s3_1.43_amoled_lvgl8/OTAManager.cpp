@@ -399,26 +399,54 @@ static bool wifi_connect_saved_core(bool report) {
 static bool connect_to_known_network() { return wifi_connect_saved_core(true);  }
 bool        ota_wifi_connect_saved()   { return wifi_connect_saved_core(false); }
 
+// One HTTPS GET, retried, with the TLS client destroyed between attempts.
+//
+// Every fetch in this file hit the same failure and each grew its own retry:
+// the first HTTPS request after associating returns -1 (connection refused)
+// because the link is up before the stack can complete a handshake. It bit the
+// pairing-code publish, the photo manifest, and finally the version check —
+// "Version check failed (HTTP -1)" — at which point a fourth ad-hoc loop was
+// clearly the wrong answer.
+//
+// Destroying the client between tries matters as much as the retry: each holds
+// ~40 KB of handshake buffers, and keeping one alive while opening another is
+// what made every image download fail while the manifest fetch succeeded.
+//
+// A negative code is HTTPClient's own error, not an HTTP status; only those are
+// worth retrying, since a real 404 will stay a 404.
+static int ota_https_get(const char* url, String* out, int attempts = 3) {
+    int code = 0;
+    for (int i = 1; i <= attempts; i++) {
+        {
+            HTTPClient http;
+            WiFiClientSecure client;
+            client.setInsecure();          // skip cert validation (lite OTA)
+            http.begin(client, url);
+            http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+            http.setTimeout(10000);
+            code = http.GET();
+            if (code == 200 && out) *out = http.getString();
+            http.end();
+            client.stop();
+        }
+        if (code == 200) return code;
+        Serial.printf("[OTA] GET %s attempt %d -> %d\n", url, i, code);
+        if (code > 0) break;               // a real HTTP status will not change on a retry
+        if (i < attempts) delay(1500);
+    }
+    return code;
+}
+
 // ── Version Check ─────────────────────────────────────────────────────────────
 static bool fetch_version_info() {
-    HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();                 // skip cert validation (lite OTA)
-    http.begin(client, OTA_VERSION_URL);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.setTimeout(10000);
-
-    int code = http.GET();
+    String payload;
+    int code = ota_https_get(OTA_VERSION_URL, &payload);
     if (code != 200) {
         char buf[64];
         snprintf(buf, sizeof(buf), "Version check failed (HTTP %d)", code);
         set_status(OTA_FAILED_SERVER, 0, buf);
-        http.end();
         return false;
     }
-
-    String payload = http.getString();
-    http.end();
 
     char remote_ver[16] = {};
     char changelog[256]  = {};
@@ -642,15 +670,8 @@ static int download_file_list(const String& payload, const char* key, const char
 
 static void download_sd_files() {
     // Re-fetch version.json to get the sd_files list
-    HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
-    http.begin(client, OTA_VERSION_URL);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    int code = http.GET();
-    if (code != 200) { http.end(); return; }
-    String payload = http.getString();
-    http.end();
+    String payload;
+    if (ota_https_get(OTA_VERSION_URL, &payload) != 200) return;
     download_file_list(payload, "sd_files", "Updating SD files");
 }
 
@@ -693,27 +714,8 @@ void ota_sync_photos() {
     // not the client's buffers.
     String payload;
     {
-        // Retried, because the first HTTPS request after associating routinely
-        // fails: the link is up before the stack can complete a TLS handshake.
-        // Measured twice on this board — the pairing-code publish hit it, and so
-        // did this fetch, which is what "could not reach the image store"
-        // reported after an otherwise successful auto-sync. A negative code is
-        // HTTPClient's connection error rather than an HTTP status.
-        int code = 0;
-        for (int attempt = 1; attempt <= 3 && payload.isEmpty(); attempt++) {
-            HTTPClient http;
-            WiFiClientSecure client;
-            client.setInsecure();
-            http.begin(client, manifest_url);
-            http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-            code = http.GET();
-            if (code == 200) payload = http.getString();
-            else Serial.printf("[OTA] photo manifest attempt %d -> %d\n", attempt, code);
-            http.end();
-            client.stop();          // free the TLS buffers before the next try
-            if (payload.isEmpty() && attempt < 3) delay(1500);
-        }
-        if (payload.isEmpty()) {
+        const int code = ota_https_get(manifest_url, &payload);
+        if (code != 200) {
             char msg[64];
             snprintf(msg, sizeof(msg), "Could not reach the image store (%d)", code);
             set_status(OTA_IDLE, 0, msg);
@@ -722,12 +724,6 @@ void ota_sync_photos() {
     }
     Serial.printf("[OTA] internal RAM before downloads: %u\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    // An empty manifest reads as the literal "null" from the Realtime Database.
-    if (payload.length() < 4) {
-        Serial.println("[OTA] photo manifest empty");
-        set_status(OTA_IDLE, 0, "No images in the app yet");
-        ota_photos_busy = false; return;
-    }
     Serial.printf("[OTA] photo manifest: %s\n", payload.c_str());
     const int got = download_file_list(payload, "files", "Syncing images");
     // Report what actually happened. "Up to date" after two failed downloads is
