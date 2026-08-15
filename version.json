@@ -1,6 +1,6 @@
 {
-  "version": "3.12",
-  "changelog": "Retry OTA fetches after Wi-Fi connects; SD payload restored",
+  "version": "3.13",
+  "changelog": "OTA fetches wait longer for slow TLS; fixes intermittent version-check failures",
   "firmware_url": "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/firmware.bin",
   "sd_files": [
     {
