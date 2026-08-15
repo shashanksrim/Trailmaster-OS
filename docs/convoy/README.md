@@ -37,7 +37,7 @@ a room (the room code is the shared secret):
           ".read": true,
           "$mid": {
             ".write": true,
-            ".validate": "newData.hasChildren(['callsign','ts']) && newData.child('callsign').val().length <= 5"
+            ".validate": "newData.hasChildren(['callsign','ts']) && newData.child('callsign').val().length <= 7"
           }
         }
       }
@@ -57,7 +57,7 @@ a room (the room code is the shared secret):
           ".validate": "newData.isString() && newData.val().length <= 15"
         },
         "callsign": {
-          ".validate": "newData.isString() && newData.val().length <= 11"
+          ".validate": "newData.isString() && newData.val().length <= 7"
         },
         "wssid": {
           ".validate": "newData.isString() && newData.val().length <= 32 && root.child('pair').child(newData.parent().child('k').val()).child('dev').val() === $id"

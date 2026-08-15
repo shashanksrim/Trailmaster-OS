@@ -108,6 +108,14 @@ static char     s_cvw_pair_url[224];
 static char     s_cvw_pub_url[248];       // our own members/<id> node
 static uint32_t s_cvw_next_pub  = 0;
 static uint32_t s_cvw_published = 0;      // successful writes, for the log
+// The pairing code has to actually LAND, not merely be attempted. Publishing it
+// straight after the join was measured failing with -1 (connection refused):
+// the association is up but the stack is not ready for TLS yet, and the request
+// after it failed identically. So it retries from the loop until it sticks, and
+// a phone that could not pair is now a matter of waiting seconds rather than a
+// dead end with no way to tell why.
+static bool     s_cvw_pair_pub_ok   = false;
+static uint32_t s_cvw_pair_pub_next = 0;
 // Stable per-board identity, derived from the eFuse MAC. The web app lists these
 // so the user can pick their own board instead of typing a room code.
 static char     s_cvw_dev_id[16];
@@ -268,14 +276,15 @@ static void convoy_wifi_publish(void) {
 // the collection. Making it expire would only mean pairing failed whenever the
 // user had not opened the Tracker in the last three minutes, which is most of
 // the time.
-static void cvw_publish_pair(void) {
+static bool cvw_publish_pair(void) {
     char url[224], body[200];
     snprintf(url, sizeof(url), "%s/pair/%s.json", CONVOY_WIFI_DB_HOST, pair_code_get());
     snprintf(body, sizeof(body), "{\"dev\":\"%s\",\"name\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
              s_cvw_dev_id, s_cvw_dev_name);
     const bool ok = cvw_request(url, "PATCH", body, nullptr);
     Serial.printf("[PAIR] code %s -> %s : %s\n", pair_code_get(), s_cvw_dev_id,
-                  ok ? "published" : "FAILED (rules published?)");
+                  ok ? "published" : "not yet, will retry");
+    return ok;
 }
 
 // ── Pairing: announce this board, and pick up a room the app assigned ────────
@@ -358,7 +367,13 @@ static void convoy_wifi_pair_tick(void) {
 
     // Adopt it, and remember it so the next drive needs no linking at all.
     strncpy(s_cvw_room, norm, sizeof(s_cvw_room) - 1); s_cvw_room[sizeof(s_cvw_room) - 1] = '\0';
-    if (app_changed_call) { strncpy(s_cvw_call, call, sizeof(s_cvw_call) - 1); s_cvw_call[sizeof(s_cvw_call) - 1] = '\0'; }
+    // Clamped, not trusted. The node may still hold a value written when the
+    // limit was 11; adopting it whole would make every subsequent write to the
+    // room fail validation, which is exactly the 401 loop this replaces.
+    if (app_changed_call) {
+        strncpy(s_cvw_call, call, CONVOY_CFG_CALL_LEN);
+        s_cvw_call[CONVOY_CFG_CALL_LEN] = '\0';
+    }
     convoy_cfg_set(s_cvw_room, s_cvw_call);
     cvw_build_room_urls();
     s_cvw_last_rx = 0;
@@ -416,10 +431,6 @@ static bool convoy_wifi_begin(void) {
     s_cvw_client.setInsecure();          // same posture as the OTA client
     s_cvw_http.setReuse(true);
 
-    // Do this first and unconditionally: a phone cannot pair with a board whose
-    // code has never reached the database, and that is the one step the user
-    // cannot see failing from the app end.
-    cvw_publish_pair();
     s_cvw_http.setTimeout(8000);
     s_cvw_begun = true;                  // cvw_request() owns begin()/end() now
     s_cvw_announced  = false;
@@ -442,6 +453,14 @@ static void convoy_wifi_loop(void) {
         // spin on it — the next tick retries, and the roster ages out to
         // "offline" on its own rather than vanishing.
         return;
+    }
+
+    // Retry the pairing code until it lands. Outside the pairing window on
+    // purpose — a phone pairs whenever the owner gets round to it, not only in
+    // the three minutes after someone opened the Tracker.
+    if (!s_cvw_pair_pub_ok && (int32_t)(now - s_cvw_pair_pub_next) >= 0) {
+        s_cvw_pair_pub_next = now + 5000;
+        s_cvw_pair_pub_ok   = cvw_publish_pair();
     }
 
     // Announce / check for an assignment, but only inside the pairing window.

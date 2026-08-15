@@ -17,6 +17,13 @@ import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS,
 const HUES = ["#00E5FF", "#00E676", "#FFD54F", "#FF4081", "#B388FF", "#FF8A65"];
 const SELF_COLOR = "#FF6A00";                    // Trailmaster orange = "me"
 
+// ONE number, because two disagreeing limits is what broke the board's own
+// position writes: devices/<id>/callsign allowed 11 while the convoy room
+// required 5, so a board that legitimately adopted a longer callsign was then
+// refused by the room with a 401 and silently vanished from its own convoy.
+// Keep in sync with convoy_cfg.h and the database rules.
+const CALLSIGN_MAX = 7;
+
 // Phase 1 — BLE relay to the Trailmaster board (peripheral). Keep these UUIDs in
 // sync with convoy_net.h on the firmware side.
 const CONVOY_NET_SVC = "54524149-4d53-5452-0001-000000000001";
@@ -148,12 +155,12 @@ function boot() {
 // ── Join / leave ──────────────────────────────────────────────────────────────
 function doJoin(rawCode) {
   const name = $("f-name").value.trim();
-  const callsign = $("f-callsign").value.trim().toUpperCase().slice(0, 5);
+  const callsign = $("f-callsign").value.trim().toUpperCase().slice(0, CALLSIGN_MAX);
   const code = normalizeCode(rawCode);
   $("f-err").textContent = "";
 
   if (!name)     return err("Enter your name.");
-  if (!callsign) return err("Enter a short callsign (≤5 chars).");
+  if (!callsign) return err(`Enter a short callsign (≤${CALLSIGN_MAX} chars).`);
   if (!code)     return err("Enter or create a convoy code.");
   if (!("geolocation" in navigator)) return err("This device has no geolocation.");
 
@@ -583,7 +590,7 @@ function encodeRoster() {
     if (id === me.id || m.lat == null) continue;
     if (t - (m.ts || 0) > STALE_DROP_MS) continue;
     const online = t - (m.ts || 0) < ONLINE_WINDOW_MS ? 1 : 0;
-    const cs = (m.callsign || "?").slice(0, 5).replace(/,/g, "");
+    const cs = (m.callsign || "?").slice(0, CALLSIGN_MAX).replace(/,/g, "");
     lines.push(`C,${cs},${m.lat.toFixed(6)},${m.lon.toFixed(6)},${online}`);
   }
   return lines.join("\n");

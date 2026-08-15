@@ -20,7 +20,13 @@
 #define CONVOY_CFG_KEY_CALL  "cvy_call"
 
 #define CONVOY_CFG_ROOM_MAX  16
-#define CONVOY_CFG_CALL_MAX  12
+// 7 characters + NUL. Seven is the agreed limit across the board, the app and
+// the database rules — a mismatch here is not cosmetic: devices/<id>/callsign
+// once allowed 11 while the convoy room required 5, so a board that adopted a
+// longer callsign had every position write rejected with 401 and dropped off
+// its own convoy without saying why.
+#define CONVOY_CFG_CALL_LEN  7
+#define CONVOY_CFG_CALL_MAX  (CONVOY_CFG_CALL_LEN + 1)
 
 // Read the saved room code into out[]. Empty string if never configured — the
 // caller decides what that means (convoy_wifi.h treats it as "not set up yet"
