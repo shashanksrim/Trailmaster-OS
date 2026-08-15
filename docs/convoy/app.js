@@ -121,10 +121,11 @@ function boot() {
           .forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   wireWifiTab();
   wireImageTab();
+  wirePairing();
   // #wifi / #img open a tab directly, so the QR on the board could point at a
   // specific one later, and so a link in a message lands where it means to.
   const want = location.hash.replace("#", "");
-  if (["wifi", "img"].includes(want)) setTimeout(() => showTab(want), 0);
+  if (["board", "wifi", "img"].includes(want)) setTimeout(() => showTab("board"), 0);
 
   if (new URLSearchParams(location.search).has("demo")) { startDemo(); return; }
 
@@ -796,8 +797,13 @@ let tab = "convoy";
 
 function showTab(which) {
   tab = which;
-  $("p-wifi").classList.toggle("hidden", which !== "wifi");
-  $("p-img").classList.toggle("hidden",  which !== "img");
+  // Two tabs, and the split is a promise about what each needs. Convoy works on
+  // any phone with a room code and no board at all. The other acts on ONE
+  // specific board, so it stays locked until this phone has been told which —
+  // showing the controls first and failing later just hides that difference.
+  const paired = !!myBoard();
+  $("p-lock").classList.toggle("hidden",  which !== "board" || paired);
+  $("p-board").classList.toggle("hidden", which !== "board" || !paired);
   // Convoy's own furniture would otherwise float above a panel.
   for (const id of ["sheet", "fabs", "hdg-btn"]) {
     const el = $(id);
@@ -805,8 +811,11 @@ function showTab(which) {
   }
   document.querySelectorAll("#tabs .tab")
           .forEach((b) => b.classList.toggle("active", b.dataset.tab === which));
-  if (which === "wifi") refreshBoardNote();
-  if (which === "img")  refreshPhotoList();
+  if (which === "board" && paired) {
+    const b = JSON.parse(localStorage.getItem("cvy_board") || "{}");
+    $("pair-name").textContent = b.name || b.dev || "your board";
+    refreshPhotoList();
+  }
 }
 
 // ── Board lookup, shared by the Wi-Fi and Images tabs ────────────────────────
@@ -821,50 +830,83 @@ async function freshBoards() {
     .filter(([, d]) => d && d.ts && (now() - d.ts) < BOARD_FRESH_MS);
 }
 
-// Which board is MINE. Everything targeted at a board — Wi-Fi, images — goes to
-// this one id and never to "whatever is listening": several Trailmasters can be
-// announcing at the same meet, and a broadcast would put one driver's home Wi-Fi
-// password onto strangers' boards.
-const myBoard   = () => localStorage.getItem("cvy_board_id") || "";
-const setMyBoard = (id) => localStorage.setItem("cvy_board_id", id);
+// Which board is MINE — resolved once, from the six characters printed on that
+// board's own settings screen, and then remembered forever.
+//
+// This replaces picking a name out of a list of every Trailmaster pairing
+// anywhere at that moment, which identified nothing: two cars at the same meet
+// showed two indistinguishable entries, and writing to the wrong one put a
+// driver's home Wi-Fi password on a stranger's dash.
+//
+// The code is a capability, not a login. Whoever can read the board's screen can
+// pair with it, which is the right test for a thing bolted into your own car.
+// Six characters from a 31-letter alphabet is ~887 million — four digits would
+// have been 10,000, and Firebase rate-limits nothing, so the whole space would
+// fall in minutes.
+const myBoard = () => {
+  try { return (JSON.parse(localStorage.getItem("cvy_board") || "{}")).dev || ""; }
+  catch { return ""; }
+};
+const myPairCode = () => {
+  try { return (JSON.parse(localStorage.getItem("cvy_board") || "{}")).code || ""; }
+  catch { return ""; }
+};
 
-// Renders into a note element: the chosen board, or a chooser when none is set.
-async function boardChooser(note, onPick) {
-  const boards = await freshBoards();
-  const mine = myBoard();
+function wirePairing() {
+  const go = $("pair-go"), inp = $("pair-code"), errEl = $("pair-err");
+  if (!go) return;
 
-  if (mine && boards.some(([id]) => id === mine)) {
-    const d = boards.find(([id]) => id === mine)[1];
-    note.textContent = "";
-    note.append(Object.assign(document.createElement("b"), { textContent: d.name || "Trailmaster" }));
-    note.append(" — this board");
-    const chg = Object.assign(document.createElement("button"),
-                              { className: "leave", textContent: "change" });
-    chg.style.marginLeft = "10px";
-    chg.addEventListener("click", () => { localStorage.removeItem("cvy_board_id"); boardChooser(note, onPick); });
-    note.append(chg);
-    if (onPick) onPick(mine);
-    return mine;
-  }
+  $("pair-forget").addEventListener("click", () => {
+    localStorage.removeItem("cvy_board");
+    showTab("board");
+  });
 
-  if (!boards.length) {
-    note.innerHTML = "<b>No board is listening.</b> Open the Tracker screen on " +
-                     "the Trailmaster — it only announces itself while that is up.";
-    return "";
-  }
+  go.addEventListener("click", async () => {
+    // The board's alphabet excludes O/0 and I/L/1 precisely because they get
+    // misread off a screen; fold the confusable ones rather than rejecting a
+    // code the user copied correctly.
+    const code = (inp.value || "").toUpperCase().replace(/[^A-Z0-9]/g, "")
+                                  .replace(/O/g, "0").replace(/[IL]/g, "1")
+                                  .replace(/0/g, "O").replace(/1/g, "I");
+    if (code.length !== 6) { errEl.textContent = "The code is six characters."; return; }
+    if (!db) { errEl.textContent = "No connection to Firebase."; return; }
 
-  note.textContent = boards.length > 1 ? "Several boards are listening. Pick yours:" : "Pick your board:";
-  for (const [id, d] of boards) {
-    const b = Object.assign(document.createElement("button"),
-                            { className: "btn btn-outline", textContent: d.name || id });
-    b.style.marginTop = "10px";
-    b.addEventListener("click", () => { setMyBoard(id); boardChooser(note, onPick); });
-    note.appendChild(b);
-  }
-  return "";
+    errEl.style.color = "";
+    errEl.textContent = "Checking…";
+    let snap;
+    try { snap = await get(ref(db, `pair/${code}`)); }
+    catch { errEl.textContent = "Couldn't reach Firebase."; return; }
+
+    const v = snap.val();
+    if (!v || !v.dev) {
+      // Either wrong, or right but the board has never been online. Both are
+      // worth saying, because the second is not the user's mistake.
+      errEl.textContent = "No board with that code. Check the characters, and " +
+                          "that the board has been online at least once since you updated it.";
+      return;
+    }
+    localStorage.setItem("cvy_board", JSON.stringify({ code, dev: v.dev, name: v.name || "" }));
+    inp.value = "";
+    errEl.textContent = "";
+    showTab("board");
+    refreshBoardNote();
+  });
 }
 
-async function refreshBoardNote() { await boardChooser($("wifi-board")); }
+// Freshness is advice here, not a gate: the pairing already says WHICH board, so
+// this only reports whether it is currently listening.
+async function refreshBoardNote() {
+  const note = $("wifi-board");
+  if (!note) return;
+  const dev = myBoard();
+  if (!dev) { note.textContent = "Not paired yet."; return; }
+  const boards = await freshBoards();
+  const live = boards.some(([id]) => id === dev);
+  note.innerHTML = live
+    ? "<b>Board is listening.</b> Anything you send lands within a few seconds."
+    : "<b>Board is not listening right now.</b> It picks Wi-Fi up the next time " +
+      "it is online and on the Tracker screen. Images can be uploaded either way.";
+}
 
 function wireWifiTab() {
   $("w-send").addEventListener("click", async () => {
@@ -875,16 +917,18 @@ function wireWifiTab() {
     if (!ssid) { errEl.textContent = "Enter a network name."; return; }
     if (ssid.length > 32 || pass.length > 64) { errEl.textContent = "Too long for the board."; return; }
 
-    // One board, explicitly chosen — never a broadcast to everything listening.
-    const id = await boardChooser($("wifi-board"));
-    if (!id) { errEl.textContent = "Pick which board this is for first."; return; }
+    const id = myBoard();
+    if (!id) { errEl.textContent = "Pair with your board first."; return; }
 
     errEl.textContent = "Sending…";
     try {
       // Flat keys, not a nested object: the database rules validate per field
       // and reject anything they do not name, so a nested shape would need a
       // rules change of its own for no benefit.
-      await update(ref(db, `devices/${id}`), { wssid: ssid, wpass: pass });
+      // `k` is the pairing code, echoed back so the rules can check the writer
+      // has actually seen this board's screen. Without it anyone who learned a
+      // device id could push credentials at it.
+      await update(ref(db, `devices/${id}`), { wssid: ssid, wpass: pass, k: myPairCode() });
       errEl.style.color = "#7ee08a";
       errEl.textContent = "Sent. The board saves it within a few seconds, then erases it here.";
       $("w-ssid").value = ""; $("w-pass").value = "";
@@ -976,8 +1020,8 @@ async function uploadImage() {
 
   // Images are stored per board, so a field full of Trailmasters does not mean
   // everyone's wallpaper on everyone's screen.
-  const dev = await boardChooser($("img-board"));
-  if (!dev) { errEl.textContent = "Pick which board these are for first."; return; }
+  const dev = myBoard();
+  if (!dev) { errEl.textContent = "Pair with your board first."; return; }
 
   const name = `tm_${Date.now().toString(36)}.bin`;
   errEl.textContent = "Converting…";
@@ -1021,8 +1065,8 @@ let pendingPhotos = [];
 
 async function refreshPhotoList() {
   const box = $("i-list");
-  const dev = await boardChooser($("img-board"));
-  if (!dev) { box.textContent = "Pick a board to see its images."; return; }
+  const dev = myBoard();
+  if (!dev) { box.textContent = "Pair with your board first."; return; }
   let files = [];
   try {
     const res = await fetch(`${RELAY_URL}/photos.json?dev=${encodeURIComponent(dev)}`, { cache: "no-store" });

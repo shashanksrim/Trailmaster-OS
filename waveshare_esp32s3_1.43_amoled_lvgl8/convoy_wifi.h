@@ -39,6 +39,7 @@
 #include "convoy_roster.h"   // pure JSON → convoy_member_t[]
 #include "convoy_cfg.h"      // room code + callsign, set from the app
 #include "gps.h"             // gps_has_fix() — the local receiver outranks the roster
+#include "pair_code.h"      // the six characters that identify THIS board to a phone
 
 // Firebase Realtime DB — keep in sync with docs/convoy/config.js (databaseURL).
 #define CONVOY_WIFI_DB_HOST "https://trailmaster-e43b1-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -289,6 +290,20 @@ static void convoy_wifi_pair_tick(void) {
                  "{\"name\":\"%s\",\"callsign\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
                  s_cvw_dev_name, s_cvw_call[0] ? s_cvw_call : "TM");
         if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
+    }
+
+    // Publish the code -> device mapping the app resolves when someone types the
+    // six characters shown on this board's settings screen. Written under the
+    // CODE, not the device id, which is the whole point: you cannot look up a
+    // board without already knowing its code, and the code is only ever on its
+    // own screen. Rules keep the pair collection itself unlistable, so there is
+    // nothing to enumerate — only ~887 million exact guesses.
+    {
+        char url[224], body[200];
+        snprintf(url, sizeof(url), "%s/pair/%s.json", CONVOY_WIFI_DB_HOST, pair_code_get());
+        snprintf(body, sizeof(body), "{\"dev\":\"%s\",\"name\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
+                 s_cvw_dev_id, s_cvw_dev_name);
+        cvw_request(url, "PATCH", body, nullptr);
     }
 
     // Wi-Fi handed down from the app's Wi-Fi tab. Consumed and DELETED in the

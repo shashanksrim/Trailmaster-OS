@@ -11,6 +11,7 @@
 #include "esp_cache.h"
 #include <AnimatedGIF.h>
 #include "OTAManager.h"
+#include "pair_code.h"   // the six characters a phone types to pair with THIS board
 
 extern Amoled amoled;
 
@@ -601,10 +602,14 @@ void pf_show_wifi_menu(void) {
 
     lv_obj_t *box = lv_obj_create(ov);
     lv_obj_remove_style_all(box);
-    lv_obj_set_size(box, 376, 200);
-    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 140);
+    // Three rows now (80 + 96 + 64 + gaps), and it starts higher to fit them.
+    // The last row is PLAIN, so its box overrunning the round bezel costs
+    // nothing visually — there is no fill or outline to be clipped, only
+    // left-aligned text that stays well inside.
+    lv_obj_set_size(box, 376, 272);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 124);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(box, 10, 0);
+    lv_obj_set_style_pad_row(box, 8, 0);
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *r1 = pf_wifi_row(box, "Networks", "Configure SSIDs and passwords");
@@ -613,6 +618,20 @@ void pf_show_wifi_menu(void) {
 
     lv_obj_t *r2 = pf_wifi_row(box, "Access companion app",
                                "Scan QR to access Convoy,\nPhotos & other settings");
+
+    // The pairing code lives HERE, next to the thing it unlocks, rather than on
+    // a screen of its own. Wi-Fi and Images in the app act on one specific
+    // board, and this is what tells the app which — and is the only proof it has
+    // that the person typing it can see this screen.
+    static char pair_sub[64];
+    snprintf(pair_sub, sizeof(pair_sub), "Type this in the app to pair");
+    lv_obj_t *r3 = pf_wifi_row_ex(box, pair_code_get(), pair_sub, PF_ROW_PLAIN);
+    lv_obj_t *r3t = lv_obj_get_child(r3, 0);
+    if (r3t) {
+        lv_obj_set_style_text_font(r3t, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(r3t, lv_color_hex(0xFF6A00), 0);
+        lv_obj_set_style_text_letter_space(r3t, 4, 0);
+    }
     lv_obj_add_flag(r2, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(r2, pf_open_wifi_qr, LV_EVENT_CLICKED, NULL);
 }

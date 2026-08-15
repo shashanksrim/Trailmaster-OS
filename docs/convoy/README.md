@@ -60,13 +60,16 @@ a room (the room code is the shared secret):
           ".validate": "newData.isString() && newData.val().length <= 11"
         },
         "wssid": {
-          ".validate": "newData.isString() && newData.val().length <= 32"
+          ".validate": "newData.isString() && newData.val().length <= 32 && root.child('pair').child(newData.parent().child('k').val()).child('dev').val() === $id"
         },
         "wpass": {
-          ".validate": "newData.isString() && newData.val().length <= 64"
+          ".validate": "newData.isString() && newData.val().length <= 64 && root.child('pair').child(newData.parent().child('k').val()).child('dev').val() === $id"
         },
         "$other": {
           ".validate": false
+        },
+        "k": {
+          ".validate": "newData.isString() && newData.val().length == 6"
         }
       }
     },
@@ -77,6 +80,25 @@ a room (the room code is the shared secret):
         ".validate": "$callsign.length <= 5",
         "room": {
           ".validate": "newData.isString() && newData.val().length <= 15"
+        },
+        "ts": {
+          ".validate": "newData.isNumber()"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "pair": {
+      "$code": {
+        ".read": true,
+        ".write": true,
+        ".validate": "$code.length == 6",
+        "dev": {
+          ".validate": "newData.isString() && newData.val().length <= 24"
+        },
+        "name": {
+          ".validate": "newData.isString() && newData.val().length <= 24"
         },
         "ts": {
           ".validate": "newData.isNumber()"
