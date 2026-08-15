@@ -433,7 +433,7 @@ void build_settings_screen() {
     lv_obj_add_flag(row_wifi, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t * lbl_wifi_s = lv_label_create(row_wifi);
-    lv_label_set_text(lbl_wifi_s, "Wifi settings");
+    lv_label_set_text(lbl_wifi_s, "Companion app & wifi");
     lv_obj_set_style_text_font(lbl_wifi_s, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_wifi_s, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(lbl_wifi_s, LV_ALIGN_LEFT_MID, 14, 0);
@@ -444,7 +444,7 @@ void build_settings_screen() {
     lv_obj_align(arrow_wifi, LV_ALIGN_RIGHT_MID, -18, 0);
 
     lv_obj_add_event_cb(row_wifi, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // saved networks | configure
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // networks | access companion app
     }, LV_EVENT_ALL, NULL);
 
     make_settings_section_header(scr_rows, "MODES");
@@ -965,9 +965,9 @@ void build_about_screen() {
     lv_obj_set_style_text_font(lbl_btn_check, &ui_font_rajdhani1, 0);
     lv_obj_center(lbl_btn_check);
 
-    // 2. "Wifi settings" — plain tappable text (no button box)
+    // 2. "Companion app & wifi" — plain tappable text (no button box)
     lv_obj_t * lbl_wifi = lv_label_create(scr_rows);
-    lv_label_set_text(lbl_wifi, "Wifi settings");
+    lv_label_set_text(lbl_wifi, "Companion app & wifi");
     lv_obj_set_style_text_font(lbl_wifi, &ui_font_rajdhani1, 0);
     lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(0xCCCCCC), 0);
     lv_obj_set_style_pad_ver(lbl_wifi, 14, 0);          // taller hit area
@@ -977,7 +977,7 @@ void build_about_screen() {
     extern void pf_show_upload_overlay(bool wifi_only);
     extern void pf_show_wifi_menu(void);
     lv_obj_add_event_cb(lbl_wifi, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // saved networks | configure
+        if (lv_event_get_code(e) == LV_EVENT_CLICKED) pf_show_wifi_menu();   // networks | access companion app
     }, LV_EVENT_ALL, NULL);
 
     // "Check for Update" opens the OTA overlay; all status/progress shows there.

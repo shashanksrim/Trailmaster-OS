@@ -37,17 +37,18 @@
 #include "OTAManager.h"      // ota_wifi_connect_saved()
 #include "convoy_ui.h"       // convoy_set_self / _heading / _car, CONVOY_MAX_CARS
 #include "convoy_roster.h"   // pure JSON → convoy_member_t[]
-#include "convoy_cfg.h"      // room code + callsign, set from the captive portal
+#include "convoy_cfg.h"      // room code + callsign, set from the app
 #include "gps.h"             // gps_has_fix() — the local receiver outranks the roster
 
 // Firebase Realtime DB — keep in sync with docs/convoy/config.js (databaseURL).
 #define CONVOY_WIFI_DB_HOST "https://trailmaster-e43b1-default-rtdb.asia-southeast1.firebasedatabase.app"
 
-// The room code and callsign are NOT compiled in. They arrive one of two ways,
-// both persisted by convoy_cfg.h:
-//   - the app's board picker writes them into this board's devices/<id> node
-//     (the normal path — the user taps their board, nothing is typed);
-//   - or the captive portal's /convoy tab, as a manual override.
+// The room code and callsign are NOT compiled in. They arrive from the app's
+// board picker, which writes them into this board's devices/<id> node (the user
+// taps their board; nothing is typed), and convoy_cfg.h persists them. The
+// captive portal used to offer a manual override — that was removed when the
+// portal shrank to Wi-Fi provisioning, since a phone on the board's AP has no
+// internet and so cannot be in a room in the first place.
 // CALLSIGN is which member in the room is THIS car: the board has no GPS, so its
 // own position comes from the owner phone's entry, found by callsign. Everyone
 // else in the room renders as another car.
@@ -288,6 +289,24 @@ static void convoy_wifi_pair_tick(void) {
                  "{\"name\":\"%s\",\"callsign\":\"%s\",\"ts\":{\".sv\":\"timestamp\"}}",
                  s_cvw_dev_name, s_cvw_call[0] ? s_cvw_call : "TM");
         if (cvw_request(s_cvw_pair_url, "PATCH", body, nullptr)) s_cvw_announced = true;
+    }
+
+    // Wi-Fi handed down from the app's Wi-Fi tab. Consumed and DELETED in the
+    // same tick: this node is world-readable, so a credential left sitting in it
+    // is a credential published. Clearing it is the only thing keeping the
+    // exposure to seconds rather than forever — see the app's own warning.
+    //
+    // Handled before the room check because adding a network is useful even on a
+    // board that has never been linked to a convoy.
+    {
+        char w_ssid[33] = {}, w_pass[65] = {};
+        json_get_str(node.c_str(), "wssid", w_ssid, sizeof(w_ssid));
+        json_get_str(node.c_str(), "wpass", w_pass, sizeof(w_pass));
+        if (w_ssid[0]) {
+            ota_add_network(w_ssid, w_pass);
+            cvw_request(s_cvw_pair_url, "PATCH", "{\"wssid\":null,\"wpass\":null}", nullptr);
+            Serial.printf("[CVW] wifi '%s' saved from the app; node cleared\n", w_ssid);
+        }
     }
 
     if (!room[0]) return;                       // not linked yet

@@ -11,7 +11,6 @@
 #include "esp_cache.h"
 #include <AnimatedGIF.h>
 #include "OTAManager.h"
-#include "convoy_cfg.h"   // convoy room code + callsign, edited from /convoy
 
 extern Amoled amoled;
 
@@ -48,10 +47,7 @@ const char index_html[] = R"rawliteral(
         .settings summary { cursor: pointer; font-weight: bold; color: #aaa; outline: none; }
         .settings label { display: block; margin-top: 10px; cursor: pointer; color: #ccc; }
         #status { margin-top: 15px; font-weight: bold; min-height: 20px; color: var(--primary); }
-        .tabs { display: flex; background: #1a1a1a; margin-bottom: 20px; border-radius: 8px; overflow: hidden; }
-        .tab { flex: 1; text-align: center; padding: 12px; color: #888; text-decoration: none; font-weight: bold; font-size: 14px; transition: 0.3s; }
-        .tab.active { background: var(--primary); color: #fff; }
-        .tab:hover:not(.active) { background: #333; color: #fff; }
+        .back { display: inline-block; margin-bottom: 16px; color: #888; text-decoration: none; font-size: 13px; }
     </style>
 </head>
 <body>
@@ -65,11 +61,7 @@ const char index_html[] = R"rawliteral(
         </h1>
     </div>
     <div class="container">
-        <div class="tabs">
-            <a href="/wifi" class="tab">Wi-Fi</a>
-            <a href="/convoy" class="tab">Convoy</a>
-            <a href="/photos" class="tab active">Photos</a>
-        </div>
+        <a class="back" href="/wifi">&larr; Wi-Fi setup</a>
         <div class="card">
             <div class="warning-banner" id="macWarning">
                 <strong>Notice:</strong> If the sync is not happening then refresh this page or toggle wifi on/off & select it again from your source device wifi menu.
@@ -220,8 +212,45 @@ const char index_html[] = R"rawliteral(
 </html>
 )rawliteral";
 
+// --- Cloud handoff ---------------------------------------------------------
+// The board portal only provisions Wi-Fi; convoy, settings and photos live in
+// the cloud PWA. Once credentials are saved there is nothing left for the phone
+// to do on the AP, so the save page hands the user straight over.
+const char* CLOUD_URL = "tinyurl.com/trailmstr";
+// SSIDs are attacker-chosen strings that get reflected into the portal's HTML,
+// so they go through here on the way in. Cheap insurance; an SSID containing a
+// quote would otherwise break the Remove form even without any malice.
+static String html_escape(const char* s) {
+    String out;
+    for (const char* p = s; *p; p++) {
+        switch (*p) {
+            case '&':  out += "&amp;";  break;
+            case '<':  out += "&lt;";   break;
+            case '>':  out += "&gt;";   break;
+            case '"':  out += "&quot;"; break;
+            case '\'': out += "&#39;";  break;
+            default:   out += *p;       break;
+        }
+    }
+    return out;
+}
+
+static String url_encode(const String& s) {
+    const char* hex = "0123456789ABCDEF";
+    String out;
+    for (size_t i = 0; i < s.length(); i++) {
+        char c = s[i];
+        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += c;
+        } else {
+            out += '%'; out += hex[(c >> 4) & 0xF]; out += hex[c & 0xF];
+        }
+    }
+    return out;
+}
+
 // --- Photo Frame Globals ---
-const char* AP_SSID = "Jimny_Dash_Sync"; 
+const char* AP_SSID = "Jimny_Dash_Sync";
 const char* AP_PASSWORD = "password123";
 const char* SD_ROOT = "/sd_card";
 WebServer photo_server(80);
@@ -257,6 +286,16 @@ bool wifi_ap_running = false;
 static bool pf_overlay_wifi_only = false;
 bool pf_autostart_wifi = false;  // when true, the WiFi overlay opens with the hotspot ON
 static uint32_t menu_opened_time = 0;
+
+// Deadline for the post-provisioning handoff, 0 when none is pending. Saving a
+// network arms it; the loop then swaps the on-screen QR from "join my hotspot"
+// to "open the app" and drops the AP.
+//
+// Deferred rather than done in the request handler for two reasons: tearing the
+// AP down there would close the server out from under its own response, and
+// LVGL work has to happen on the UI thread. The delay also lets the success
+// page render and be read before the network under it disappears.
+static volatile uint32_t pf_provisioned_at = 0;
 
 extern void switch_to_launcher();
 
@@ -386,39 +425,75 @@ static lv_obj_t *pf_wifi_sheet(const char *title) {
 
 // A settings-style row (400x80 elsewhere; 356 here so the corners clear the
 // round bezel, same trim as the convoy order list).
-static lv_obj_t *pf_wifi_row(lv_obj_t *parent, const char *title, const char *sub) {
+// Two looks, and the difference is a promise about behaviour: a CARD is raised
+// and outlined because tapping it does something, a PLAIN row is just text on
+// the sheet because it does not. The saved-SSID list used cards and so invited
+// taps that were never wired to anything.
+typedef enum { PF_ROW_CARD, PF_ROW_PLAIN, PF_ROW_DANGER } pf_row_style_t;
+
+static lv_obj_t *pf_wifi_row_ex(lv_obj_t *parent, const char *title, const char *sub,
+                                pf_row_style_t style) {
+    const bool two_line = sub && strchr(sub, '\n') != NULL;
     lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_size(row, 356, 80);
-    lv_obj_set_style_bg_color(row, lv_color_hex(0x1A1A1A), 0);
-    lv_obj_set_style_bg_opa(row, 255, 0);
-    lv_obj_set_style_border_width(row, 1, 0);
-    lv_obj_set_style_border_color(row, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_radius(row, 12, 0);
+    lv_obj_set_size(row, 356, style == PF_ROW_PLAIN ? 64 : (two_line ? 96 : 80));
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(row, 12, 0);
+
+    uint32_t title_col = 0xFFFFFF;
+    if (style == PF_ROW_PLAIN) {
+        // Nothing at all — no fill, no outline, no rule between entries. The
+        // spacing carries the grouping, and dropping the separators is what
+        // stops a read-only list from reading as a stack of controls.
+        lv_obj_set_style_bg_opa(row, 0, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_radius(row, 0, 0);
+    } else if (style == PF_ROW_DANGER) {
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x2A1512), 0);
+        lv_obj_set_style_bg_opa(row, 255, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_hex(0x7A2E28), 0);
+        title_col = 0xFF6B5E;
+    } else {
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x1A1A1A), 0);
+        lv_obj_set_style_bg_opa(row, 255, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_hex(0x333333), 0);
+    }
 
     lv_obj_t *t = lv_label_create(row);
     lv_label_set_text(t, title);
     lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(t, LV_ALIGN_LEFT_MID, 6, sub && sub[0] ? -13 : 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(title_col), 0);
+    int t_dy = 0;
+    if (sub && sub[0]) t_dy = (style == PF_ROW_PLAIN) ? -11 : (two_line ? -24 : -13);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 6, t_dy);
 
     if (sub && sub[0]) {
         lv_obj_t *sl = lv_label_create(row);
         lv_label_set_text(sl, sub);
         lv_obj_set_style_text_font(sl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(sl, lv_color_hex(0x888888), 0);
-        lv_obj_align(sl, LV_ALIGN_LEFT_MID, 6, 14);
+        lv_obj_set_style_text_color(sl, lv_color_hex(style == PF_ROW_DANGER ? 0xB07068 : 0x888888), 0);
+        lv_obj_set_style_text_line_space(sl, 2, 0);
+        lv_obj_align(sl, LV_ALIGN_LEFT_MID, 6, style == PF_ROW_PLAIN ? 12 : (two_line ? 12 : 14));
     }
     return row;
 }
+
+static lv_obj_t *pf_wifi_row(lv_obj_t *parent, const char *title, const char *sub) {
+    return pf_wifi_row_ex(parent, title, sub, PF_ROW_CARD);
+}
+
+static void pf_forget_all_cb(lv_event_t *e);
+static uint32_t pf_forget_armed_ms = 0;   // first tap of the two-tap confirm
 
 // Page 2: what the board actually has stored, passwords included. Showing them
 // in clear is deliberate — this is a private dash, and a settings page that hid
 // the one field you need to verify would just send you back to a serial cable.
 static void pf_show_saved_networks(lv_event_t *e) {
     (void)e;
+    pf_forget_armed_ms = 0;        // never inherit an arm from a previous visit
     pf_close_wifi_menu(NULL);
-    lv_obj_t *ov = pf_wifi_sheet("SAVED NETWORKS");
+    lv_obj_t *ov = pf_wifi_sheet("NETWORKS");
     pf_wifi_menu = ov;
 
     lv_obj_t *box = lv_obj_create(ov);
@@ -434,13 +509,63 @@ static void pf_show_saved_networks(lv_event_t *e) {
     if (n == 0) {
         lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_t *m = lv_label_create(box);
-        lv_label_set_text(m, "No networks saved.\nUse Configure to add one.");
+        lv_label_set_text(m, "No networks saved.");
         lv_obj_set_style_text_font(m, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(m, lv_color_hex(0x8CA6B6), 0);
         lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
         return;
     }
-    for (int i = 0; i < n; i++) pf_wifi_row(box, ssids[i], passes[i]);
+
+    // The action goes ABOVE the list. It is the only control on this screen, and
+    // putting it under a list that scrolls would hide it exactly when there are
+    // most networks to clear.
+    //
+    // Forgetting is also the ONLY way back to the unprovisioned state: once the
+    // board has a network the hotspot stops starting, so the web portal — where
+    // the per-network Remove buttons live — cannot be reached at all.
+    lv_obj_t *forget = pf_wifi_row_ex(box, "Forget all networks", "Returns to Wi-Fi setup",
+                                      PF_ROW_DANGER);
+    lv_obj_add_flag(forget, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(forget, pf_forget_all_cb, LV_EVENT_CLICKED, NULL);
+
+    for (int i = 0; i < n; i++) pf_wifi_row_ex(box, ssids[i], passes[i], PF_ROW_PLAIN);
+}
+
+static void pf_forget_all_cb(lv_event_t *e) {
+    lv_obj_t *row   = lv_event_get_target(e);
+    lv_obj_t *title = lv_obj_get_child(row, 0);
+    lv_obj_t *sub   = lv_obj_get_child(row, 1);
+
+    // Two taps, because this sits one tap away from a screen people open just to
+    // read a password back, and the only recovery from a stray tap is walking
+    // the whole provisioning flow again.
+    if (!pf_forget_armed_ms || lv_tick_elaps(pf_forget_armed_ms) > 4000) {
+        pf_forget_armed_ms = lv_tick_get();
+        if (title) {
+            lv_label_set_text(title, "Tap again to confirm");
+            lv_obj_set_style_text_color(title, lv_color_hex(0xFF5A4F), 0);
+        }
+        if (sub) lv_label_set_text(sub, "Erases every saved network");
+        return;
+    }
+    pf_forget_armed_ms = 0;
+
+    char ssids[8][33] = {};
+    int n = ota_list_networks(ssids, 8);
+    for (int i = 0; i < n; i++) ota_remove_network(ssids[i]);   // clears SD and NVS
+    Serial.printf("[PF] forgot %d saved network(s) — back to Wi-Fi setup\n", n);
+
+    // Straight back to setup rather than to an empty list. Erasing the last
+    // network puts the board in the unprovisioned state, and the QR is the whole
+    // of what that state offers — the same screen a first-run board shows.
+    //
+    // Deferred: this callback is running on a row inside the sheet being torn
+    // down, and deleting that from its own event handler is how you get a
+    // use-after-free out of LVGL.
+    lv_async_call([](void *) {
+        pf_close_wifi_menu(NULL);
+        pf_show_upload_overlay(true);
+    }, NULL);
 }
 
 static void pf_open_wifi_qr(lv_event_t *e) {
@@ -449,9 +574,29 @@ static void pf_open_wifi_qr(lv_event_t *e) {
     pf_show_upload_overlay(true);
 }
 
+// With nothing saved there is no list worth showing — the only useful thing is
+// the setup QR, so go straight to it rather than making the user read an empty
+// screen and find the other row. Once networks exist this opens the list, which
+// is also where Forget lives.
+static void pf_open_networks(lv_event_t *e) {
+    char ssids[8][33] = {};
+    if (ota_list_networks(ssids, 8) == 0) { pf_open_wifi_qr(e); return; }
+    pf_show_saved_networks(e);
+}
+
 void pf_show_wifi_menu(void) {
     if (pf_wifi_menu) return;
-    lv_obj_t *ov = pf_wifi_sheet("WI-FI");
+
+    // With no network saved there is nothing behind either menu row worth
+    // choosing between: the companion app is unreachable and the only list is
+    // empty. Skip the menu entirely and open setup. The menu appears from the
+    // next visit on, once there is something to manage.
+    {
+        char probe[8][33] = {};
+        if (ota_list_networks(probe, 8) == 0) { pf_show_upload_overlay(true); return; }
+    }
+
+    lv_obj_t *ov = pf_wifi_sheet("COMPANION & WI-FI");
     pf_wifi_menu = ov;
 
     lv_obj_t *box = lv_obj_create(ov);
@@ -462,11 +607,12 @@ void pf_show_wifi_menu(void) {
     lv_obj_set_style_pad_row(box, 10, 0);
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *r1 = pf_wifi_row(box, "Saved networks", "View stored SSIDs and passwords");
+    lv_obj_t *r1 = pf_wifi_row(box, "Networks", "Configure SSIDs and passwords");
     lv_obj_add_flag(r1, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(r1, pf_show_saved_networks, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(r1, pf_open_networks, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *r2 = pf_wifi_row(box, "Configure", "Scan the QR to add a network");
+    lv_obj_t *r2 = pf_wifi_row(box, "Access companion app",
+                               "Scan QR to access Convoy,\nPhotos & other settings");
     lv_obj_add_flag(r2, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(r2, pf_open_wifi_qr, LV_EVENT_CLICKED, NULL);
 }
@@ -513,6 +659,20 @@ void pf_show_upload_overlay(bool wifi_only) {
 
     // Logo removed as requested
 
+    // What this screen is FOR flips once the board has Wi-Fi. Before that, the
+    // only thing that can work is joining the AP, so it shows the join QR and
+    // the steps. After that, the useful destination is the app — and the phone
+    // is off the AP by then, so a camera scan opens the normal browser with a
+    // real internet route.
+    //
+    // That is the whole point of doing the handoff HERE rather than in the
+    // portal page: the portal is served through a captive window the OS owns
+    // and destroys with the Wi-Fi, and escaping it needs per-OS URL schemes
+    // that behaved differently on every phone tried. A QR on the device has
+    // none of that in the path.
+    char cfg_ssids[8][33] = {};
+    bool provisioned = wifi_only && (ota_list_networks(cfg_ssids, 8) > 0);
+
     // Drawn at NATIVE SIZE. The asset is 222x222 with a 4-module white quiet
     // zone baked in, which is what makes it scannable — the previous 200x200
     // asset had the finder pattern starting at pixel 0 (no quiet zone at all)
@@ -521,13 +681,17 @@ void pf_show_upload_overlay(bool wifi_only) {
     // until a camera cannot resolve them. Never scale this by a non-integer
     // factor; if it ever needs to be bigger, regenerate it or use 512 (2x).
     // Large variant where the toggle row is gone, small where it stays.
+    // Sizes differ because the captions do. The provisioned screen says one
+    // line, so the 259 QR fits under it; the setup screen carries three numbered
+    // steps, and on a ROUND display the usable width collapses as you go down —
+    // at y=420 there is only ~280px of glass. The 222 asset buys those rows.
     extern const lv_img_dsc_t wifi_qrcode;      // 222x222, 6px modules
-    extern const lv_img_dsc_t wifi_qrcode_lg;   // 259x259, 7px modules
+    extern const lv_img_dsc_t app_qrcode;       // 259x259, 7px modules — the app
     lv_obj_t * qr_img = lv_img_create(pf_upload_overlay);
-    lv_img_set_src(qr_img, wifi_only ? &wifi_qrcode_lg : &wifi_qrcode);
-    lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, wifi_only ? 10 : -10);
+    lv_img_set_src(qr_img, provisioned ? &app_qrcode : &wifi_qrcode);
+    lv_obj_align(qr_img, LV_ALIGN_CENTER, 0, provisioned ? 6 : (wifi_only ? -6 : -10));
 
-    if (wifi_only) {
+    if (wifi_only && !provisioned) {
     // No toggle here: opening Wi-Fi setup IS the request to turn the hotspot on,
     // so asking again is a step with no decision behind it — and the row it
     // occupied is what lets the QR be comfortably scannable.
@@ -544,6 +708,11 @@ void pf_show_upload_overlay(bool wifi_only) {
         lv_timer_del(tm);
     }, 400, NULL);
     (void)ap_start;
+    } else if (provisioned) {
+    // No AP at all on this branch. There is nothing to configure, and leaving
+    // the hotspot up is what used to strand the phone on a network with no
+    // internet — exactly what the app QR is here to avoid.
+    pf_autostart_wifi = false;
     } else {
     // Wi-Fi Toggle Switch — wrapped in a flex row so the label+switch pair is
     // centered as a unit (previously the switch was hardcoded at center+50,
@@ -596,18 +765,33 @@ void pf_show_upload_overlay(bool wifi_only) {
     }
     }   // end !wifi_only
 
+    // Caption. The unprovisioned case spells out the steps, because scanning a
+    // Wi-Fi QR only gets the phone onto the AP — the setup page is a separate
+    // move and users were left guessing at it.
+    // Kept deliberately short. These sit low on a round screen where the glass
+    // narrows fast, so every line has to clear the bezel at its own height.
     lv_obj_t * hint = lv_label_create(pf_upload_overlay);
-    lv_label_set_text(hint, "Wi-Fi: Jimny_Dash_Sync | Pass: password123");
+    if (provisioned) {
+        lv_label_set_text(hint, "Scan to open the app");
+    } else if (wifi_only) {
+        lv_label_set_text(hint, "1  Join Jimny_Dash_Sync\n"
+                                "2  Setup page opens itself\n"
+                                "3  Add your Wi-Fi");
+    } else {
+        lv_label_set_text(hint, "Wi-Fi: Jimny_Dash_Sync | Pass: password123");
+    }
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(wifi_only ? 0x333333 : 0x888888), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(hint, LV_ALIGN_CENTER, 0, wifi_only ? 155 : 168);
+    lv_obj_set_style_text_line_space(hint, 3, 0);
+    lv_obj_align(hint, LV_ALIGN_CENTER, 0, provisioned ? 158 : (wifi_only ? 140 : 168));
 
     lv_obj_t * cred_lbl = lv_label_create(pf_upload_overlay);
-    lv_label_set_text(cred_lbl, "Visit 192.168.4.1");
+    lv_label_set_text(cred_lbl, provisioned ? CLOUD_URL
+                                            : (wifi_only ? "Pass: password123" : "Visit 192.168.4.1"));
     lv_obj_set_style_text_color(cred_lbl, lv_color_hex(wifi_only ? 0xB34700 : 0xFF9800), 0);
     lv_obj_set_style_text_font(cred_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_align(cred_lbl, LV_ALIGN_CENTER, 0, 180);
+    lv_obj_align(cred_lbl, LV_ALIGN_CENTER, 0, provisioned ? 180 : (wifi_only ? 190 : 180));
 
     lv_obj_move_foreground(pf_upload_overlay);
     pf_invalidate_full_screen();
@@ -1169,9 +1353,13 @@ void photoframe_setup() {
         }
     }
 
-    // Default page is now Wi-Fi setup; photo sync moved to /photos.
+    // The portal is Wi-Fi provisioning and nothing else — that is the only thing
+    // that CAN work here, because a phone on this AP has no route to the
+    // internet. Convoy and settings moved to the cloud PWA (see
+    // docs/CLIENT_UNIFICATION_PLAN.md); /photos survives unadvertised as the
+    // offline upload fallback until cloud photo sync replaces it.
     photo_server.on("/", HTTP_GET, []() { photo_server.sendHeader("Location", "/wifi"); photo_server.send(302); });
-    photo_server.on("/photos", HTTP_GET, []() { photo_server.send(200, "text/html", index_html); });
+    photo_server.on("/photos", HTTP_GET, []() { Serial.println("[PF] req /photos"); photo_server.send(200, "text/html", index_html); });
     photo_server.on("/upload", HTTP_POST, []() { photo_server.send(200, "text/plain", "OK"); }, []() {
         HTTPUpload& upload = photo_server.upload();
         if (upload.status == UPLOAD_FILE_START) {
@@ -1187,19 +1375,54 @@ void photoframe_setup() {
 
     // ── WiFi Network Setup endpoints (for OTA) ────────────────────────────────
     photo_server.on("/wifi", HTTP_GET, []() {
+        Serial.printf("[PF] req /wifi host='%s'\n", photo_server.hostHeader().c_str());
         // Collect saved networks for display
         char ssids[8][33] = {};
         int count = ota_list_networks(ssids, 8);
         String net_list = "";
         for (int i = 0; i < count; i++) {
+            String s = html_escape(ssids[i]);
             net_list += "<li style='padding:6px 0;border-bottom:1px solid #333;'>";
-            net_list += "<span style='color:#eee;'>" + String(ssids[i]) + "</span>";
+            net_list += "<span style='color:#eee;'>" + s + "</span>";
             net_list += "<form style='display:inline;margin-left:12px;' method='POST' action='/wifi/remove'>";
-            net_list += "<input type='hidden' name='ssid' value='" + String(ssids[i]) + "'>";
+            net_list += "<input type='hidden' name='ssid' value='" + s + "'>";
             net_list += "<button style='background:#c0392b;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;'>Remove</button>";
             net_list += "</form></li>";
         }
         if (net_list.isEmpty()) net_list = "<li style='color:#666;'>No networks saved yet</li>";
+
+        // The handoff to the cloud PWA — the one place the portal points at it.
+        // Shown whenever the board HAS a network, not only in the moment one is
+        // saved: any visit with credentials already stored is a visit where the
+        // useful next step is the app, and a user who came back to add a second
+        // network should not have to save something to be told where to go.
+        //
+        // It points at the DEVICE SCREEN rather than offering a link. This page
+        // is served through the OS captive-portal window, which the OS destroys
+        // along with the Wi-Fi — so nothing here can survive long enough to
+        // carry the phone to the app. The board's own screen can: it switches
+        // to an app QR, the hotspot goes away, the phone returns to mobile data,
+        // and a camera scan lands in the normal browser with a working route.
+        bool just_saved = photo_server.hasArg("ok");
+        String done = "";
+        if (just_saved || count > 0) {
+            done = "<div class='card done'>";
+            if (just_saved) {
+                done += "<h2 class='ok'>&#10003; Saved &mdash; ";
+                done += html_escape(photo_server.arg("ok").c_str());
+                done += "</h2><p class='l'>The board joins this network by itself from now on, "
+                        "and its hotspot switches off in a few seconds.";
+            } else {
+                done += "<h2 class='ok'>&#10003; This board is set up</h2>"
+                        "<p class='l'>It already has Wi-Fi saved.";
+            }
+            done += " Everything else &mdash; convoy, callsign, photos &mdash; lives in the app.</p>"
+                    "<div class='url'>Scan the QR on the device screen</div>"
+                    "<p class='l'>The screen is showing a code for <b>";
+            done += CLOUD_URL;
+            done += "</b>. Scan it with your camera once this page stops responding &mdash; by "
+                    "then your phone is back on mobile data and the link will load.</p></div>";
+        }
 
         String page = R"rawliteral(
 <!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -1210,17 +1433,24 @@ void photoframe_setup() {
   .header { background: #000; width: 100%; padding: 20px 0; text-align: center; border-bottom: 3px solid var(--primary); margin-bottom: 20px; }
   .header h1 { margin: 0; font-size: 24px; letter-spacing: 2px; text-transform: uppercase; display: flex; align-items: center; justify-content: center; gap: 10px; }
   .container { padding: 0 20px 20px 20px; width: 100%; max-width: 440px; box-sizing: border-box; }
-  .tabs { display: flex; background: #1a1a1a; margin-bottom: 20px; border-radius: 8px; overflow: hidden; }
-  .tab { flex: 1; text-align: center; padding: 12px; color: #888; text-decoration: none; font-weight: bold; font-size: 14px; transition: 0.3s; }
-  .tab.active { background: var(--primary); color: #fff; }
-  .tab:hover:not(.active) { background: #333; color: #fff; }
   p{color:#aaa;font-size:14px;margin:0 0 20px;text-align:center;}
+  .l{text-align:left;}
   .card{background:var(--card);border-radius:12px;padding:25px;width:100%;box-shadow: 0 8px 16px rgba(0,0,0,0.5);box-sizing:border-box;margin-bottom:20px;}
   .card h2{font-size:16px;color:var(--primary);margin:0 0 14px;text-align:left;}
+  .done{border:1px solid var(--primary);}
+  .done h2.ok{color:#2ecc71;}
+  /* 222 = 37 modules x 6px. Any non-integer factor smears the module edges past
+     what a phone camera can resolve — same rule as the on-screen QR. */
+  .qr{display:block;margin:0 auto 14px;width:222px;height:222px;background:#fff;border-radius:6px;
+      image-rendering:-webkit-optimize-contrast;image-rendering:pixelated;}
+  a.url{display:block;background:#000;padding:16px;border-radius:8px;text-align:center;font-size:18px;
+        letter-spacing:1px;color:#9cf;margin-bottom:14px;text-decoration:none;border:1px solid #234;}
+  a.url:active{background:#101820;}
   ul{list-style:none;margin:0;padding:0;text-align:left;}
   input{width:100%;box-sizing:border-box;background:#111;border:1px solid #444;color:#eee;padding:12px;border-radius:8px;font-size:16px;margin-bottom:15px;}
   button.primary{width:100%;background:var(--primary);color:#fff;border:none;padding:15px;border-radius:8px;font-size:16px;font-weight:bold;text-transform:uppercase;cursor:pointer;transition:0.3s;}
   button.primary:hover{background:#d35400;}
+  .foot{display:block;text-align:center;color:#555;font-size:12px;text-decoration:none;}
 </style></head><body>
   <div class="header">
       <h1>
@@ -1229,11 +1459,9 @@ void photoframe_setup() {
       </h1>
   </div>
   <div class="container">
-      <div class="tabs">
-          <a href="/wifi" class="tab active">Wi-Fi</a>
-          <a href="/convoy" class="tab">Convoy</a>
-          <a href="/photos" class="tab">Photos</a>
-      </div>
+)rawliteral";
+        page += done;
+        page += R"rawliteral(
       <p>Add your home WiFi or phone hotspot. The device will connect automatically when you check for updates.</p>
       <div class='card'>
         <h2>Saved Networks</h2>
@@ -1250,103 +1478,10 @@ void photoframe_setup() {
     <button class='primary' type='submit'>Sync to Device</button>
   </form>
 </div>
+<a class='foot' href='/photos'>Send photos over this Wi-Fi</a>
   </div>
 </body></html>)rawliteral";
         photo_server.send(200, "text/html", page);
-    });
-
-    // ── Convoy settings ──────────────────────────────────────────────────────
-    // Which room to join and which member in it is this car. Typing these on a
-    // 1.43" round screen would be miserable, so they live here where the phone
-    // keyboard is — same trip the user already makes to add a WiFi network.
-    photo_server.on("/convoy", HTTP_GET, []() {
-        char room[CONVOY_CFG_ROOM_MAX] = {}, call[CONVOY_CFG_CALL_MAX] = {};
-        convoy_cfg_get_room(room, sizeof(room));
-        convoy_cfg_get_callsign(call, sizeof(call));
-
-        String page = R"rawliteral(
-<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Trailmaster Sync — Convoy</title>
-<style>
-  :root { --primary: #e67e22; --bg: #121212; --card: #1e1e1e; --text: #f5f5f5; }
-  body{margin:0;background:var(--bg);color:var(--text);font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;display:flex;flex-direction:column;align-items:center;padding:0;}
-  .header { background: #000; width: 100%; padding: 20px 0; text-align: center; border-bottom: 3px solid var(--primary); margin-bottom: 20px; }
-  .header h1 { margin: 0; font-size: 24px; letter-spacing: 2px; text-transform: uppercase; display: flex; align-items: center; justify-content: center; gap: 10px; }
-  .container { padding: 0 20px 20px 20px; width: 100%; max-width: 440px; box-sizing: border-box; }
-  .tabs { display: flex; background: #1a1a1a; margin-bottom: 20px; border-radius: 8px; overflow: hidden; }
-  .tab { flex: 1; text-align: center; padding: 12px; color: #888; text-decoration: none; font-weight: bold; font-size: 14px; transition: 0.3s; }
-  .tab.active { background: var(--primary); color: #fff; }
-  .tab:hover:not(.active) { background: #333; color: #fff; }
-  p{color:#aaa;font-size:14px;margin:0 0 20px;text-align:center;}
-  .card{background:var(--card);border-radius:12px;padding:25px;width:100%;box-shadow: 0 8px 16px rgba(0,0,0,0.5);box-sizing:border-box;margin-bottom:20px;}
-  .card h2{font-size:16px;color:var(--primary);margin:0 0 14px;text-align:left;}
-  label{display:block;text-align:left;color:#bbb;font-size:13px;margin-bottom:6px;}
-  .hint{color:#777;font-size:12px;margin:-8px 0 16px;text-align:left;}
-  input{width:100%;box-sizing:border-box;background:#111;border:1px solid #444;color:#eee;padding:12px;border-radius:8px;font-size:16px;margin-bottom:8px;text-transform:uppercase;}
-  button.primary{width:100%;background:var(--primary);color:#fff;border:none;padding:15px;border-radius:8px;font-size:16px;font-weight:bold;text-transform:uppercase;cursor:pointer;transition:0.3s;}
-  button.primary:hover{background:#d35400;}
-</style></head><body>
-  <div class="header">
-      <h1>
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
-          TRAILMASTER
-      </h1>
-  </div>
-  <div class="container">
-      <div class="tabs">
-          <a href="/wifi" class="tab">Wi-Fi</a>
-          <a href="/convoy" class="tab active">Convoy</a>
-          <a href="/photos" class="tab">Photos</a>
-      </div>
-      <p>Convoy is set up from the app, not from here.</p>
-      <div class='card'>
-        <h2>Set up convoy</h2>
-        <p style='text-align:left;margin:0 0 12px'>Everything convoy &mdash; joining a
-        convoy, linking this board, background tracking &mdash; happens at:</p>
-        <div style='background:#000;padding:14px;border-radius:8px;text-align:center;
-                    font-size:18px;letter-spacing:1px;color:#9cf;margin-bottom:12px'>
-          tinyurl.com/trailmstr
-        </div>
-        <p style='text-align:left;color:#888;font-size:13px;margin:0'>
-        <b>Disconnect from Jimny_Dash_Sync first</b> &mdash; while you are on the
-        board's Wi-Fi your phone has no internet, so that link will not load.
-        Rejoin your normal network, open it, and tap <b>Connect</b> to link this
-        board. No codes to type.</p>
-      </div>
-      <div class='card'>
-        <h2>Manual override</h2>
-        <p style='text-align:left;color:#888;font-size:13px;margin:0 0 12px'>Only
-        needed if you cannot reach the app. Linking from the app sets both of
-        these for you, and keeps them up to date when the convoy changes.</p>
-        <form method='POST' action='/convoy/save'>
-          <label>Room code</label>
-          <input type='text' name='room' maxlength='15' placeholder='e.g. AENP' value=')rawliteral";
-        page += String(room);
-        page += R"rawliteral('>
-          <div class='hint'>The code shown in the Convoy app. The "TM-" prefix is optional.</div>
-          <label>This car's callsign</label>
-          <input type='text' name='call' maxlength='11' placeholder='e.g. TM1' value=')rawliteral";
-        page += String(call);
-        page += R"rawliteral('>
-          <div class='hint'>Must match your own callsign in the app &mdash; that entry is what puts this car on the radar. Everyone else shows as another car.</div>
-          <button class='primary' type='submit'>Save to Device</button>
-          <div class='hint' style='margin-top:10px'>Note: the app overwrites these
-          when you link the board, which is usually what you want.</div>
-        </form>
-      </div>
-  </div>
-</body></html>)rawliteral";
-        photo_server.send(200, "text/html", page);
-    });
-
-    photo_server.on("/convoy/save", HTTP_POST, []() {
-        String room = photo_server.arg("room");
-        String call = photo_server.arg("call");
-        convoy_cfg_set(room.c_str(), call.c_str());
-        Serial.printf("[CVY] config saved: room='%s' callsign='%s'\n",
-                      room.c_str(), call.c_str());
-        photo_server.sendHeader("Location", "/convoy");
-        photo_server.send(303);
     });
 
     photo_server.on("/wifi/add", HTTP_POST, []() {
@@ -1354,13 +1489,32 @@ void photoframe_setup() {
         String pass = photo_server.arg("pass");
         if (ssid.length() > 0) {
             ota_add_network(ssid.c_str(), pass.c_str());
-            photo_server.sendHeader("Location", "/wifi");
+            // 8 s: long enough to follow the redirect and read the success card,
+            // short enough that the user is not left sitting on a dead network.
+            pf_provisioned_at = millis() + 8000;
+            Serial.printf("[PF] '%s' saved — app QR in 8s\n", ssid.c_str());
+            photo_server.sendHeader("Location", "/wifi?ok=" + url_encode(ssid));
             photo_server.send(303);
         } else {
             photo_server.send(400, "text/plain", "SSID required");
         }
     });
 
+    // The handoff. The hard part is not the redirect, it is WHICH WINDOW we are
+    // in: joining a captive network opens the OS's portal window (Android's
+    // CaptivePortalLogin, iOS's Captive Network Assistant), and that window is
+    // owned by the Wi-Fi session. Drop the AP and the window is destroyed — which
+    // is why waiting inside it to forward somewhere could never work. The page
+    // has to escape to the phone's real browser first, and the only lever for
+    // that is a platform URL scheme.
+    //
+    // Both platforms escape to this same page with ?go=1. The escape buys only
+    // one thing — a window that outlives the Wi-Fi — and never the app itself:
+    // on the AP our own DNS answers for every host, so aiming a browser at the
+    // app URL just re-renders the setup page. (Measured, not assumed: Chrome on
+    // a Pixel rides the AP the same way Safari does.) The ?go=1 copy, running in
+    // that surviving window, arms the teardown and waits the AP out.
+    //
     photo_server.on("/wifi/remove", HTTP_POST, []() {
         String ssid = photo_server.arg("ssid");
         if (ssid.length() > 0) {
@@ -1368,6 +1522,29 @@ void photoframe_setup() {
         }
         photo_server.sendHeader("Location", "/wifi");
         photo_server.send(303);
+    });
+
+    // ── Captive portal ────────────────────────────────────────────────────────
+    // Nothing can make a phone JOIN a network without the user agreeing — that
+    // consent is an OS guarantee and the QR's WIFI: payload already buys the
+    // one-tap prompt. What we CAN do is skip the "now type 192.168.4.1" step
+    // after they join.
+    //
+    // Every OS probes a known URL the moment it joins and decides a portal is
+    // present when the answer is not the one it expected: Android wants a bare
+    // 204 from /generate_204, iOS and macOS want a specific Success page from
+    // /hotspot-detect.html, Windows wants known text from /ncsi.txt. A 302 is
+    // none of those, so all of them conclude "portal" and open a browser on
+    // whatever we point at. photo_dnsServer already answers every hostname with
+    // our own IP, so each of those probes arrives here as an unknown path.
+    photo_server.onNotFound([]() {
+        // Logged with the Host header, because that is the one thing that says
+        // WHO the browser thought it was talking to — a probe, our own IP, or a
+        // hijacked lookup of the app's hostname.
+        Serial.printf("[PF] req 404 host='%s' uri='%s'\n",
+                      photo_server.hostHeader().c_str(), photo_server.uri().c_str());
+        photo_server.sendHeader("Location", "http://192.168.4.1/wifi", true);
+        photo_server.send(302, "text/plain", "");
     });
 
     photo_server.on("/wifi/list", HTTP_GET, []() {
@@ -1381,6 +1558,11 @@ void photoframe_setup() {
         json += "]";
         photo_server.send(200, "application/json", json);
     });
+
+    // WebServer discards headers it was not told to keep; the handoff logging
+    // wants User-Agent to tell the captive window apart from the real browser.
+    static const char * kept[] = { "User-Agent" };
+    photo_server.collectHeaders(kept, 1);
 }
 
 void start_photoframe_wifi() {
@@ -1438,6 +1620,22 @@ void photoframe_loop_handler() {
     }
 
     if (wifi_ap_running) { photo_dnsServer.processNextRequest(); photo_server.handleClient(); }
+
+    // Armed by /wifi/add. Rebuilding the overlay is what swaps the QR: reopening
+    // it re-reads the saved networks, so it comes back in its provisioned form —
+    // the app code, and no AP. Closing first is what actually stops the hotspot,
+    // and it also means a join-me QR is never left on screen for a network that
+    // no longer exists.
+    if (pf_provisioned_at && (int32_t)(millis() - pf_provisioned_at) >= 0) {
+        pf_provisioned_at = 0;
+        Serial.println("[PF] provisioned: AP down, screen now shows the app QR");
+        if (upload_overlay_open && pf_overlay_wifi_only) {
+            pf_close_upload_overlay();
+            pf_show_upload_overlay(true);
+        } else {
+            stop_photoframe_wifi();
+        }
+    }
 
     int curr_page = (lv_obj_get_scroll_x(pf_pages) + 233) / 466;
     if (lv_scr_act() == photoframe_screen && slideshow_active && !delete_dialog_open &&
