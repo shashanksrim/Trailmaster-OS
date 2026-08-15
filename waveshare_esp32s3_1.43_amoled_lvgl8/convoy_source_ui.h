@@ -166,6 +166,15 @@ static lv_obj_t *convoy_src_build_screen(void) {
     } else {
         lv_obj_t *c = cvsrc_card(convoy_src_screen, "WIFI", "Over phone hotspot", CVSRC_GREEN, cvsrc_cloud_evt);
         lv_obj_align(c, LV_ALIGN_CENTER, 0, 0);
+
+        // Says WHY there is only one card here. A single-choice picker otherwise
+        // looks like a limitation of the device rather than a switch the user
+        // turned off — and there is no other clue pointing at where it lives.
+        lv_obj_t *hint = cv_label(convoy_src_screen, &lv_font_montserrat_14,
+                                  lv_color_hex(0x4E6675));
+        lv_label_set_text(hint, "Enable additional networks from settings");
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(hint, LV_ALIGN_CENTER, 0, 105);
     }
     cvsrc_close_btn(convoy_src_screen, cvsrc_back_evt);
 
