@@ -821,16 +821,50 @@ async function freshBoards() {
     .filter(([, d]) => d && d.ts && (now() - d.ts) < BOARD_FRESH_MS);
 }
 
-async function refreshBoardNote() {
-  const note = $("wifi-board");
+// Which board is MINE. Everything targeted at a board — Wi-Fi, images — goes to
+// this one id and never to "whatever is listening": several Trailmasters can be
+// announcing at the same meet, and a broadcast would put one driver's home Wi-Fi
+// password onto strangers' boards.
+const myBoard   = () => localStorage.getItem("cvy_board_id") || "";
+const setMyBoard = (id) => localStorage.setItem("cvy_board_id", id);
+
+// Renders into a note element: the chosen board, or a chooser when none is set.
+async function boardChooser(note, onPick) {
   const boards = await freshBoards();
+  const mine = myBoard();
+
+  if (mine && boards.some(([id]) => id === mine)) {
+    const d = boards.find(([id]) => id === mine)[1];
+    note.textContent = "";
+    note.append(Object.assign(document.createElement("b"), { textContent: d.name || "Trailmaster" }));
+    note.append(" — this board");
+    const chg = Object.assign(document.createElement("button"),
+                              { className: "leave", textContent: "change" });
+    chg.style.marginLeft = "10px";
+    chg.addEventListener("click", () => { localStorage.removeItem("cvy_board_id"); boardChooser(note, onPick); });
+    note.append(chg);
+    if (onPick) onPick(mine);
+    return mine;
+  }
+
   if (!boards.length) {
     note.innerHTML = "<b>No board is listening.</b> Open the Tracker screen on " +
-                     "the Trailmaster — it only accepts settings while that is up.";
-    return;
+                     "the Trailmaster — it only announces itself while that is up.";
+    return "";
   }
-  note.innerHTML = "Sending to <b>" + boards.map(([, d]) => d.name || "Trailmaster").join(", ") + "</b>";
+
+  note.textContent = boards.length > 1 ? "Several boards are listening. Pick yours:" : "Pick your board:";
+  for (const [id, d] of boards) {
+    const b = Object.assign(document.createElement("button"),
+                            { className: "btn btn-outline", textContent: d.name || id });
+    b.style.marginTop = "10px";
+    b.addEventListener("click", () => { setMyBoard(id); boardChooser(note, onPick); });
+    note.appendChild(b);
+  }
+  return "";
 }
+
+async function refreshBoardNote() { await boardChooser($("wifi-board")); }
 
 function wireWifiTab() {
   $("w-send").addEventListener("click", async () => {
@@ -841,16 +875,16 @@ function wireWifiTab() {
     if (!ssid) { errEl.textContent = "Enter a network name."; return; }
     if (ssid.length > 32 || pass.length > 64) { errEl.textContent = "Too long for the board."; return; }
 
-    const boards = await freshBoards();
-    if (!boards.length) { errEl.textContent = "No board is listening right now."; return; }
+    // One board, explicitly chosen — never a broadcast to everything listening.
+    const id = await boardChooser($("wifi-board"));
+    if (!id) { errEl.textContent = "Pick which board this is for first."; return; }
 
     errEl.textContent = "Sending…";
     try {
       // Flat keys, not a nested object: the database rules validate per field
       // and reject anything they do not name, so a nested shape would need a
       // rules change of its own for no benefit.
-      await Promise.all(boards.map(([id]) =>
-        update(ref(db, `devices/${id}`), { wssid: ssid, wpass: pass })));
+      await update(ref(db, `devices/${id}`), { wssid: ssid, wpass: pass });
       errEl.style.color = "#7ee08a";
       errEl.textContent = "Sent. The board saves it within a few seconds, then erases it here.";
       $("w-ssid").value = ""; $("w-pass").value = "";
@@ -940,6 +974,11 @@ async function uploadImage() {
   errEl.style.color = "";
   if (!imgEl || !db) return;
 
+  // Images are stored per board, so a field full of Trailmasters does not mean
+  // everyone's wallpaper on everyone's screen.
+  const dev = await boardChooser($("img-board"));
+  if (!dev) { errEl.textContent = "Pick which board these are for first."; return; }
+
   const name = `tm_${Date.now().toString(36)}.bin`;
   errEl.textContent = "Converting…";
   const bytes = toRGB565($("i-canvas").getContext("2d"));
@@ -950,7 +989,7 @@ async function uploadImage() {
     // which cannot be provisioned without a billing account. The Worker also
     // SERVES the manifest, derived from what it actually holds — so there is no
     // writable list of URLs anywhere that could point the board at another host.
-    const res = await fetch(`${RELAY_URL}/photo/${name}?t=${encodeURIComponent(RELAY_TOKEN)}`, {
+    const res = await fetch(`${RELAY_URL}/photo/${dev}/${name}?t=${encodeURIComponent(RELAY_TOKEN)}`, {
       method: "PUT",
       headers: { "content-type": "application/octet-stream" },
       body: bytes,
@@ -982,9 +1021,11 @@ let pendingPhotos = [];
 
 async function refreshPhotoList() {
   const box = $("i-list");
+  const dev = await boardChooser($("img-board"));
+  if (!dev) { box.textContent = "Pick a board to see its images."; return; }
   let files = [];
   try {
-    const res = await fetch(`${RELAY_URL}/photos.json`, { cache: "no-store" });
+    const res = await fetch(`${RELAY_URL}/photos.json?dev=${encodeURIComponent(dev)}`, { cache: "no-store" });
     files = (await res.json()).files || [];
   } catch { box.textContent = "Couldn't reach the photo store."; return; }
 

@@ -288,32 +288,32 @@ frame[0] = 0xAB;
 console.log("=== photo store ===");
 
 // A missing binding must say so rather than 500 — it is the likeliest misconfig.
-r = await worker.fetch(new Request("https://r.dev/photos.json"), { RELAY_TOKEN: "SEKRIT" });
+r = await worker.fetch(new Request("https://r.dev/photos.json?dev=AABB1122"), { RELAY_TOKEN: "SEKRIT" });
 check(r.status === 501, "unbound KV reported as 501");
 
-r = await pcall("/photo/a.bin", { method: "PUT", body: frame });
+r = await pcall("/photo/AABB1122/a.bin", { method: "PUT", body: frame });
 check(r.status === 403, "upload without a token rejected");
 
 // Unencoded "../" never reaches the handler — new URL() normalises it away —
 // so the encoded form is the one the name rule actually has to stop.
-r = await pcall("/photo/%2E%2E%2Fetc?t=SEKRIT", { method: "PUT", body: frame });
+r = await pcall("/photo/AABB1122/%2E%2E%2Fetc?t=SEKRIT", { method: "PUT", body: frame });
 check(r.status === 400, "encoded traversal in the name rejected");
-r = await pcall("/photo/notaframe.txt?t=SEKRIT", { method: "PUT", body: frame });
+r = await pcall("/photo/AABB1122/notaframe.txt?t=SEKRIT", { method: "PUT", body: frame });
 check(r.status === 400, "non-.bin name rejected");
 
-r = await pcall("/photo/tm_1.bin?t=SEKRIT", { method: "PUT", body: frame });
+r = await pcall("/photo/AABB1122/tm_1.bin?t=SEKRIT", { method: "PUT", body: frame });
 check(r.status === 200, `upload accepted (got ${r.status})`);
-check(penv.PHOTOS.m.get("photo:tm_1.bin").byteLength === 434312, "stored 466x466x2 bytes");
+check(penv.PHOTOS.m.get("photo:AABB1122:tm_1.bin").byteLength === 434312, "stored 466x466x2 bytes");
 
-r = await pcall("/photo/empty.bin?t=SEKRIT", { method: "PUT", body: new Uint8Array(0) });
+r = await pcall("/photo/AABB1122/empty.bin?t=SEKRIT", { method: "PUT", body: new Uint8Array(0) });
 check(r.status === 413, "empty upload rejected");
 
 // The manifest is DERIVED from KV, which is what stops it naming another host.
-r = await pcall("/photos.json");
+r = await pcall("/photos.json?dev=AABB1122");
 const man = await r.json();
 check(man.files.length === 1, `manifest lists one file (got ${man.files.length})`);
 check(man.files[0].path === "tm_1.bin", "manifest path is the bare name");
-check(man.files[0].url === "https://r.dev/photo/tm_1.bin", `manifest url self-hosted (got ${man.files[0].url})`);
+check(man.files[0].url === "https://r.dev/photo/AABB1122/tm_1.bin", `manifest url self-hosted (got ${man.files[0].url})`);
 check(man.files.every((f) => f.url.startsWith("https://r.dev/")), "no manifest url can point off-origin");
 
 // Shape the firmware's download_file_list() scans for.
@@ -321,16 +321,16 @@ const raw = JSON.stringify(man);
 check(raw.includes('"files"') && raw.includes('"path":') && raw.includes('"url":'),
       "manifest shape matches download_file_list");
 
-r = await pcall("/photo/tm_1.bin");
+r = await pcall("/photo/AABB1122/tm_1.bin");
 check(r.status === 200, "download works without a token");
 check((await r.arrayBuffer()).byteLength === 434312, "downloaded bytes round-trip");
 
-r = await pcall("/photo/nope.bin");
+r = await pcall("/photo/AABB1122/nope.bin");
 check(r.status === 404, "missing image 404s");
 
-r = await pcall("/photo/tm_1.bin?t=SEKRIT", { method: "DELETE" });
+r = await pcall("/photo/AABB1122/tm_1.bin?t=SEKRIT", { method: "DELETE" });
 check(r.status === 200, "delete accepted");
-check((await (await pcall("/photos.json")).json()).files.length === 0, "manifest empties after delete");
+check((await (await pcall("/photos.json?dev=AABB1122")).json()).files.length === 0, "manifest empties after delete");
 
 // The relay's own routing must still work with the photo routes in front.
 sent = null;
@@ -340,6 +340,20 @@ globalThis.fetch = async (url, init) => {
 };
 r = await call("/AENP/SEKRIT?id=TM1&lat=1&lon=2");
 check(r.status === 200 && sent !== null, "relay route unaffected by photo routes");
+
+
+// --- two boards on the field must not see each other's images ---
+await pcall("/photo/AABB1122/mine.bin?t=SEKRIT", { method: "PUT", body: frame });
+await pcall("/photo/CCDD3344/theirs.bin?t=SEKRIT", { method: "PUT", body: frame });
+const mineMan  = await (await pcall("/photos.json?dev=AABB1122")).json();
+const theirMan = await (await pcall("/photos.json?dev=CCDD3344")).json();
+check(mineMan.files.length === 1 && mineMan.files[0].path === "mine.bin", "board A sees only its own image");
+check(theirMan.files.length === 1 && theirMan.files[0].path === "theirs.bin", "board B sees only its own image");
+check(mineMan.files[0].url.includes("/AABB1122/"), "board A url is scoped to board A");
+
+// An unscoped manifest must NOT fall back to the whole store.
+r = await pcall("/photos.json");
+check(r.status === 400, `manifest without dev refused (got ${r.status})`);
 
 console.log(`PASS: ${pass}  FAIL: ${fail}`);
 process.exit(fail ? 1 : 0);

@@ -641,10 +641,19 @@ void ota_sync_photos() {
         Serial.println("[OTA] photo sync: no network");
         return;
     }
+    // Ask only for THIS board's images. The id is the eFuse MAC, derived
+    // identically to convoy_wifi.h's devices/<id>, which is how the app knows
+    // what to upload under. Without the scope every Trailmaster on a trip would
+    // download every image any of them was ever sent.
+    const uint64_t mac = ESP.getEfuseMac();
+    char manifest_url[192];
+    snprintf(manifest_url, sizeof(manifest_url), "%s?dev=%04X%08X",
+             OTA_PHOTO_MANIFEST_URL, (uint16_t)(mac >> 32), (uint32_t)mac);
+
     HTTPClient http;
     WiFiClientSecure client;
     client.setInsecure();
-    http.begin(client, OTA_PHOTO_MANIFEST_URL);
+    http.begin(client, manifest_url);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     int code = http.GET();
     if (code != 200) { Serial.printf("[OTA] photo manifest -> %d\n", code); http.end(); return; }
