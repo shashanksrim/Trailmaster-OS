@@ -266,5 +266,80 @@ r = await call("/AENP/SEKRIT?id=TM1&lat=1&lon=2");
 check(r.status === 502, "firebase error surfaced as 502");
 check((await r.text()).includes("permission denied"), "firebase detail included");
 
+// ── Photo store ──────────────────────────────────────────────────────────────
+// In-memory stand-in for Workers KV: enough of the surface the Worker uses.
+function fakeKV() {
+  const m = new Map();
+  return {
+    m,
+    async put(k, v) { m.set(k, v); },
+    async get(k)    { return m.has(k) ? m.get(k) : null; },
+    async delete(k) { m.delete(k); },
+    async list({ prefix }) {
+      return { keys: [...m.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })) };
+    },
+  };
+}
+const penv = { RELAY_TOKEN: "SEKRIT", PHOTOS: fakeKV() };
+const pcall = (path, init) => worker.fetch(new Request("https://r.dev" + path, init), penv);
+const frame = new Uint8Array(466 * 466 * 2);
+frame[0] = 0xAB;
+
+console.log("=== photo store ===");
+
+// A missing binding must say so rather than 500 — it is the likeliest misconfig.
+r = await worker.fetch(new Request("https://r.dev/photos.json"), { RELAY_TOKEN: "SEKRIT" });
+check(r.status === 501, "unbound KV reported as 501");
+
+r = await pcall("/photo/a.bin", { method: "PUT", body: frame });
+check(r.status === 403, "upload without a token rejected");
+
+// Unencoded "../" never reaches the handler — new URL() normalises it away —
+// so the encoded form is the one the name rule actually has to stop.
+r = await pcall("/photo/%2E%2E%2Fetc?t=SEKRIT", { method: "PUT", body: frame });
+check(r.status === 400, "encoded traversal in the name rejected");
+r = await pcall("/photo/notaframe.txt?t=SEKRIT", { method: "PUT", body: frame });
+check(r.status === 400, "non-.bin name rejected");
+
+r = await pcall("/photo/tm_1.bin?t=SEKRIT", { method: "PUT", body: frame });
+check(r.status === 200, `upload accepted (got ${r.status})`);
+check(penv.PHOTOS.m.get("photo:tm_1.bin").byteLength === 434312, "stored 466x466x2 bytes");
+
+r = await pcall("/photo/empty.bin?t=SEKRIT", { method: "PUT", body: new Uint8Array(0) });
+check(r.status === 413, "empty upload rejected");
+
+// The manifest is DERIVED from KV, which is what stops it naming another host.
+r = await pcall("/photos.json");
+const man = await r.json();
+check(man.files.length === 1, `manifest lists one file (got ${man.files.length})`);
+check(man.files[0].path === "tm_1.bin", "manifest path is the bare name");
+check(man.files[0].url === "https://r.dev/photo/tm_1.bin", `manifest url self-hosted (got ${man.files[0].url})`);
+check(man.files.every((f) => f.url.startsWith("https://r.dev/")), "no manifest url can point off-origin");
+
+// Shape the firmware's download_file_list() scans for.
+const raw = JSON.stringify(man);
+check(raw.includes('"files"') && raw.includes('"path":') && raw.includes('"url":'),
+      "manifest shape matches download_file_list");
+
+r = await pcall("/photo/tm_1.bin");
+check(r.status === 200, "download works without a token");
+check((await r.arrayBuffer()).byteLength === 434312, "downloaded bytes round-trip");
+
+r = await pcall("/photo/nope.bin");
+check(r.status === 404, "missing image 404s");
+
+r = await pcall("/photo/tm_1.bin?t=SEKRIT", { method: "DELETE" });
+check(r.status === 200, "delete accepted");
+check((await (await pcall("/photos.json")).json()).files.length === 0, "manifest empties after delete");
+
+// The relay's own routing must still work with the photo routes in front.
+sent = null;
+globalThis.fetch = async (url, init) => {
+  sent = { url, body: JSON.parse(init.body), method: init.method };
+  return new Response("{}", { status: 200 });
+};
+r = await call("/AENP/SEKRIT?id=TM1&lat=1&lon=2");
+check(r.status === 200 && sent !== null, "relay route unaffected by photo routes");
+
 console.log(`PASS: ${pass}  FAIL: ${fail}`);
 process.exit(fail ? 1 : 0);

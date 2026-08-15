@@ -10,9 +10,6 @@ import {
   getDatabase, ref, set, remove, update, onValue, get,
   onChildAdded, onChildChanged, onChildRemoved,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import {
-  getStorage, ref as sref, uploadBytes, getDownloadURL,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { firebaseConfig, PUSH_INTERVAL_MS, ONLINE_WINDOW_MS, STALE_DROP_MS,
          RELAY_URL, RELAY_TOKEN } from "./config.js";
 
@@ -949,46 +946,59 @@ async function uploadImage() {
 
   try {
     errEl.textContent = "Uploading…";
-    const storage = getStorage();
-    const dest = sref(storage, `photos/${name}`);
-    await uploadBytes(dest, bytes, { contentType: "application/octet-stream" });
-    const url = await getDownloadURL(dest);
+    // Straight to the relay Worker's KV store rather than Firebase Storage,
+    // which cannot be provisioned without a billing account. The Worker also
+    // SERVES the manifest, derived from what it actually holds — so there is no
+    // writable list of URLs anywhere that could point the board at another host.
+    const res = await fetch(`${RELAY_URL}/photo/${name}?t=${encodeURIComponent(RELAY_TOKEN)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: bytes,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).trim()}`);
 
-    // The board reads this list on its own schedule (ota_sync_photos) and
-    // downloads anything it does not already have, so publishing the entry IS
-    // the handoff — nothing has to be pushed to the board directly.
-    const snap = await get(ref(db, "photos/files"));
-    const files = Array.isArray(snap.val()) ? snap.val() : [];
-    files.push({ path: name, url });
-    await set(ref(db, "photos/files"), files);
-
+    // KV list() is eventually consistent — measured ~10 s, documented up to 60.
+    // The image is stored the moment the PUT returns, but the manifest is
+    // derived from list(), so re-reading it now would show nothing and read as
+    // a failed upload. Carry it locally until the manifest catches up.
+    pendingPhotos.push(name);
     errEl.style.color = "#7ee08a";
     errEl.textContent = "Uploaded. The board fetches it next time it syncs.";
     $("i-send").disabled = true;
     refreshPhotoList();
   } catch (e) {
-    // Storage is a separate Firebase product and is not enabled by default;
-    // say so plainly rather than reporting a generic failure.
-    const msg = String(e && e.code || e);
-    errEl.textContent = msg.includes("storage/unauthorized") || msg.includes("storage/unknown")
-      ? "Firebase Storage rejected this — enable Storage and allow writes to photos/."
+    const msg = String(e && e.message || e);
+    errEl.textContent = msg.includes("501")
+      ? "The relay Worker has no PHOTOS store bound yet."
       : "Upload failed: " + msg;
     console.warn(e);
   }
 }
 
+// Uploaded this session but not yet visible in the manifest. Merged into the
+// list below and dropped again once list() catches up, so the entry never
+// appears twice and never disappears in between.
+let pendingPhotos = [];
+
 async function refreshPhotoList() {
   const box = $("i-list");
-  if (!db) { box.textContent = "—"; return; }
-  let snap;
-  try { snap = await get(ref(db, "photos/files")); } catch { box.textContent = "Couldn't read."; return; }
-  const files = Array.isArray(snap.val()) ? snap.val() : [];
+  let files = [];
+  try {
+    const res = await fetch(`${RELAY_URL}/photos.json`, { cache: "no-store" });
+    files = (await res.json()).files || [];
+  } catch { box.textContent = "Couldn't reach the photo store."; return; }
+
+  const names = files.map((f) => f.path).filter(Boolean);
+  pendingPhotos = pendingPhotos.filter((p) => !names.includes(p));
+  const all = names.concat(pendingPhotos);
+
   box.textContent = "";
-  if (!files.length) { box.textContent = "Nothing published yet."; return; }
-  for (const f of files) {
+  if (!all.length) { box.textContent = "Nothing published yet."; return; }
+  for (const name of all) {
     const d = document.createElement("div");
     d.className = "it";
-    d.textContent = f.path || "?";
+    d.textContent = name;
+    if (pendingPhotos.includes(name)) d.textContent += " ·";   // still settling
     box.appendChild(d);
   }
 }

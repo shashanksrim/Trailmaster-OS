@@ -4,3 +4,11 @@ compatibility_date = "2024-11-01"
 
 # The shared secret is NOT set here — it would end up in git. Set it with:
 #   npx wrangler secret put RELAY_TOKEN
+
+# Board images (/photo/*, /photos.json). Create the namespace and paste the id:
+#   npx wrangler kv namespace create PHOTOS
+# Free plan covers this easily — 1 GB total, 25 MiB per value, and one 466x466
+# frame is 424 KB.
+[[kv_namespaces]]
+binding = "PHOTOS"
+id = "1323a9a75fcb4909b57c0c34bc6a1baa"

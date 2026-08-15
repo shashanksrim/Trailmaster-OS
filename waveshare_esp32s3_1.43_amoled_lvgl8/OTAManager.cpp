@@ -15,11 +15,18 @@
 // Update this to match your actual GitHub username / repo name.
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/shashanksrim/Trailmaster-OS/main/version.json"
 
-// Photo-frame manifest, written by the convoy web app. Same shape as the
+// Photo-frame manifest, published by the convoy web app. Same shape as the
 // version.json sd_files array: {"files":[{"path":"/photos/x.jpg","url":"..."}]}.
-// Kept in the Realtime Database rather than the repo so uploading photos does
-// not mean making a commit.
-#define OTA_PHOTO_MANIFEST_URL "https://trailmaster-e43b1-default-rtdb.asia-southeast1.firebasedatabase.app/photos.json"
+// Served from the repo neither — uploading a photo should not mean making a
+// commit.
+//
+// Served by the relay Worker rather than the Realtime Database, and that is a
+// safety property rather than a preference: this manifest decides what URLs the
+// board downloads, and the database is world-writable, so anyone could have
+// pointed it at any host. The Worker builds the list from the images it is
+// actually holding, so every url in it is one the Worker serves.
+// Keep in sync with RELAY_URL in docs/convoy/config.js.
+#define OTA_PHOTO_MANIFEST_URL "https://trailmaster-relay.shashank-srim.workers.dev/photos.json"
 #define OTA_NVS_NS       "ota_wifi"
 #define OTA_MAX_NETWORKS 8
 #define OTA_WIFI_TIMEOUT_MS 15000

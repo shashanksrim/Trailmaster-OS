@@ -47,23 +47,26 @@ a room (the room code is the shared secret):
       "$id": {
         ".write": true,
         ".validate": "$id.length <= 24",
-        "name":     { ".validate": "newData.isString() && newData.val().length <= 24" },
-        "ts":       { ".validate": "newData.isNumber()" },
-        "room":     { ".validate": "newData.isString() && newData.val().length <= 15" },
-        "callsign": { ".validate": "newData.isString() && newData.val().length <= 11" },
-        "wssid":    { ".validate": "newData.isString() && newData.val().length <= 32" },
-        "wpass":    { ".validate": "newData.isString() && newData.val().length <= 64" },
-        "$other":   { ".validate": false }
-      }
-    },
-    "photos": {
-      ".read": true,
-      ".write": true,
-      "files": {
-        "$i": {
-          "path": { ".validate": "newData.isString() && newData.val().length <= 64" },
-          "url":  { ".validate": "newData.isString() && newData.val().length <= 512" },
-          "$other": { ".validate": false }
+        "name": {
+          ".validate": "newData.isString() && newData.val().length <= 24"
+        },
+        "ts": {
+          ".validate": "newData.isNumber()"
+        },
+        "room": {
+          ".validate": "newData.isString() && newData.val().length <= 15"
+        },
+        "callsign": {
+          ".validate": "newData.isString() && newData.val().length <= 11"
+        },
+        "wssid": {
+          ".validate": "newData.isString() && newData.val().length <= 32"
+        },
+        "wpass": {
+          ".validate": "newData.isString() && newData.val().length <= 64"
+        },
+        "$other": {
+          ".validate": false
         }
       }
     },
@@ -72,9 +75,15 @@ a room (the room code is the shared secret):
         ".read": true,
         ".write": true,
         ".validate": "$callsign.length <= 5",
-        "room": { ".validate": "newData.isString() && newData.val().length <= 15" },
-        "ts":   { ".validate": "newData.isNumber()" },
-        "$other": { ".validate": false }
+        "room": {
+          ".validate": "newData.isString() && newData.val().length <= 15"
+        },
+        "ts": {
+          ".validate": "newData.isNumber()"
+        },
+        "$other": {
+          ".validate": false
+        }
       }
     }
   }
@@ -88,14 +97,31 @@ them (`convoy_wifi_pair_tick`), which bounds the window to seconds rather than
 removing it. For a network you actually care about, provision over the board's
 own setup hotspot instead, where the password never leaves the room.
 
-### Images need Firebase Storage (separate one-time step)
+### Images live on the relay Worker, not Firebase Storage
 
-The Images tab converts a photo to raw RGB565 in the browser and uploads the
-`.bin` to **Storage**, then publishes `{path, url}` into `photos/files`, which is
-what `ota_sync_photos()` already reads. Storage is a different product from the
-Realtime Database and is **not** enabled by default: Firebase console → Build →
-Storage → Get started, then allow writes under `photos/`. Until that exists the
-tab reports the rejection rather than failing silently.
+Firebase Storage is a Google Cloud Storage bucket with a Firebase badge, and
+provisioning one now requires the **Blaze** plan — a billing account, to host a
+few hundred KB of wallpaper. Board images go to Workers KV on the existing relay
+Worker instead (`relay/`), which is free at this size: 1 GB total, 25 MiB per
+value, against a 424 KB frame.
+
+The Worker also SERVES the manifest at `/photos.json`, built from the images it
+is actually holding. That is the part that matters: `ota_sync_photos()`
+downloads whatever url the manifest names, so a world-writable manifest would be
+a way to make the board fetch an arbitrary host. Deriving it from KV means every
+url is one the Worker serves. Note this comes from the SHAPE, not the token —
+`RELAY_TOKEN` is in `config.js`, which is public, so it is a speed bump.
+
+One-time setup:
+
+```sh
+cd relay
+npx wrangler kv namespace create PHOTOS   # paste the id into wrangler.toml
+npx wrangler deploy
+```
+
+`OTA_PHOTO_MANIFEST_URL` in `OTAManager.cpp` must match `RELAY_URL` in
+`config.js`; both point at the Worker.
 
 **`devices` and `assign` are not optional.** Realtime Database rules are
 deny-by-default, so a rule set that only mentions `convoys` denies everything
