@@ -27,6 +27,7 @@
 // actually holding, so every url in it is one the Worker serves.
 // Keep in sync with RELAY_URL in docs/convoy/config.js.
 #define OTA_PHOTO_MANIFEST_URL "https://trailmaster-relay.shashank-srim.workers.dev/photos.json"
+#define SD_MOUNT_POINT   "/sd_card"
 #define OTA_NVS_NS       "ota_wifi"
 #define OTA_MAX_NETWORKS 8
 #define OTA_WIFI_TIMEOUT_MS 15000
@@ -516,6 +517,19 @@ static bool download_and_flash_firmware(const char* url) {
 // URL instead means photo setup can live at the same public URL as everything
 // else, and the captive portal is left doing only the Wi-Fi bootstrap that
 // genuinely cannot happen anywhere else.
+// Join the SD root to a manifest path with exactly one slash between them.
+//
+// The two manifests disagree on shape and always have: version.json's sd_files
+// carry a leading slash ("/photos/x.bin"), while the photo Worker names files
+// bare ("tm_abc.bin") because they live in a flat KV keyspace. Concatenating
+// blindly produced "/sd_cardtm_abc.bin" — a path outside the card, so the
+// download reported success and the frame stayed empty.
+static String sd_full_path(const char* sd_path) {
+    String p(sd_path);
+    if (!p.startsWith("/")) p = "/" + p;
+    return String(SD_MOUNT_POINT) + p;
+}
+
 static void download_file_list(const String& payload, const char* key, const char* label) {
     const char* p = payload.c_str();
     char pat[32];
@@ -564,7 +578,7 @@ static void download_file_list(const String& payload, const char* key, const cha
         // Skip files already present on the SD card. This makes re-provisioning
         // cheap: a populated card downloads nothing; a blank card gets everything.
         {
-            String existing = String("/sd_card") + sd_path;
+            String existing = sd_full_path(sd_path);
             struct stat stt;
             if (stat(existing.c_str(), &stt) == 0 && stt.st_size > 0) { done++; continue; }
         }
@@ -580,7 +594,7 @@ static void download_file_list(const String& payload, const char* key, const cha
         fhttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
         int fcode = fhttp.GET();
         if (fcode == 200) {
-            String full_path = String("/sd_card") + sd_path;
+            String full_path = sd_full_path(sd_path);
             // Create any intermediate directories (fopen won't make them)
             {
                 char tmp[160];
