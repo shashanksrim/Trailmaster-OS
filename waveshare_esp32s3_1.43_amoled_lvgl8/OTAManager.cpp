@@ -423,7 +423,16 @@ static int ota_https_get(const char* url, String* out, int attempts = 3) {
             client.setInsecure();          // skip cert validation (lite OTA)
             http.begin(client, url);
             http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-            http.setTimeout(10000);
+            // 20 s, not 10: a -1 here is indistinguishable from a slow
+            // handshake, and GitHub's chain is heavier than the Worker's.
+            http.setTimeout(20000);
+            // Internal RAM, because that is what a TLS handshake competes for.
+            // The Worker fetch succeeds at ~80 KB free; if GitHub fails at the
+            // same moment the number tells us whether the difference is memory
+            // or the host.
+            Serial.printf("[OTA] internal RAM before GET: %u (largest block %u)\n",
+                          heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
             code = http.GET();
             if (code == 200 && out) *out = http.getString();
             http.end();
